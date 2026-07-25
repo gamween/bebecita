@@ -130,6 +130,24 @@ The Uniswap API accepts chainId `11155111`, and Uniswap's own FAQ states there i
 | v4 PositionManager | `0x429ba70129df741B2Ca2a85BC3A2a3328e5c09b4` |
 | v4 StateView | `0xe1dd9c3fa50edb962e442f60dfbc432e24537e4c` |
 
+## What a fill costs
+
+| | gas |
+|---|---|
+| Bebecita fill, including both PositionManager calls | 323,264 to 357,464 |
+| A bare Aqua fill on the same curve, for reference | about 100,000 |
+
+Measured on Sepolia, from the receipts of six real fills. The spread comes from whether the redeposit finds an
+existing position tick range warm.
+
+The overhead is the honest cost of the design: every fill carries a decrease and an increase against the v4
+PositionManager, on top of the swap itself. It is worth naming rather than hiding, because it is also what
+sets the floor under a useful fill. Below a certain size a clip costs more in unwind gas than it earns in
+spread, and that boundary is a real property of the product rather than a defect.
+
+For comparison, the reference figures published in the swap-vm gas snapshot put `XYCConcentrate` alone at
+101,161 gas on a swap and 16,898 on a quote.
+
 ## Uniswap API integration
 
 The API is the funding mechanism, not a data source. Qualifying function claimed: **liquidity provision**, literally, with two PositionManager calls built by the API at fill time and executed on-chain inside every fill.
