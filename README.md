@@ -222,6 +222,7 @@ yarn fill                     # quote, size, unwind, swap, redeposit, one transa
 yarn fill --amount=250        # a smaller clip
 yarn fill --dry               # simulate against live state and broadcast nothing
 yarn demo:reset               # re-salt the order and re-ship it, ready for a fresh fill
+yarn solver:serve             # the same fill behind POST /fill, for the dashboard button
 ```
 
 `yarn fill` reads the quote through `quote()` on a staticcall, which is what `asView()` exists for, sizes the
@@ -254,6 +255,7 @@ back to something a human can read.
 ## Frontend
 
 ```bash
+yarn solver:serve                      # the fill, over HTTP, on 127.0.0.1:8787
 cd app && yarn install && yarn dev     # http://localhost:5173
 ```
 
@@ -262,6 +264,20 @@ the position, the vault and the Aqua balances live from Sepolia, calls `quote()`
 the Uniswap LP API for real, and shows every API request and response with its response headers. Addresses are
 read at runtime from `deployments/sepolia.json` and `solver/src/config.ts`, never copied. See
 [app/README.md](app/README.md).
+
+Its **Run a fill** button posts to `yarn solver:serve`, which runs `solver/src/fill.ts`, which is what
+`yarn fill` runs. The steps stream back as they happen and the transaction is then read back from its own
+receipt: the `Swapped` amounts, and the two PositionManager calls with the position's liquidity before and
+after each. Without that process the button says so and stays inert, because the fill is signed by the key
+that owns the vault and a browser tab does not hold it.
+
+The dashboard leads with **SLAC**, the Shared Liquidity Amplification Coefficient of the Aqua whitepaper,
+page 4: the total liquidity provisioned across every strategy this vault has shipped, over the wallet equity
+backing it. It is shown twice, because the denominator is the whole argument. Against the vault's plain ERC20
+balances it is in the hundreds, and undefined when the float is zero, which is what a wallet balance check
+sees. Against free float plus `reachableFromPosition()`, the figure instruction `0x92` clamps to on chain, it
+is finite. Every strategy hash comes from the vault's own `Shipped` events, not from the deployment record,
+which only ever names the live one.
 
 Iteration discipline, measured on the build machine: a full `forge build` costs **3 min 49** because of `via_ir`, `forge build --skip test` costs **17 s**, and `forge test --match-path <one file>` costs **13 s**. Never run the bare commands.
 
