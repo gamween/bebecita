@@ -7,10 +7,32 @@ import type { Wallet } from '../App'
 import { vaultAbi } from '../lib/abi'
 import { CHAIN, publicClient, walletClientFor } from '../lib/client'
 import type { AppConfig } from '../lib/config'
-import { fillWiring, runFill, type FillResult } from '../lib/fill'
-import { addressUrl, ago, amount as fmtAmount, integer, reason, short, stringify, txUrl } from '../lib/format'
+import {
+  fillWiring,
+  probeSolver,
+  runFill,
+  solverUrl,
+  type FillResult,
+  type FillStep,
+  type SolverProbe,
+} from '../lib/fill'
+import {
+  addressUrl,
+  ago,
+  amount as fmtAmount,
+  integer,
+  ok,
+  reason,
+  short,
+  stringify,
+  txUrl,
+  type Result,
+} from '../lib/format'
+import { readHistory, settled, type History } from '../lib/history'
 import { orderFrom, requestQuote, type QuoteResult } from '../lib/quote'
-import { readSnapshot, type Snapshot } from '../lib/state'
+import { readFillReceipt, type FillReceipt } from '../lib/receipt'
+import { ratio, slacOf, tokens as wholeTokens, type SlacLeg, type SlacNumerator } from '../lib/slac'
+import { readSnapshot, tokenOf, type Snapshot } from '../lib/state'
 import { claimFees, decrease, findTransactionRequest, poolInfo, type TransactionRequest } from '../lib/uniswap'
 
 type Action<T> =
@@ -20,6 +42,22 @@ type Action<T> =
   | { status: 'error'; message: string }
 
 const idle = { status: 'idle' } as const
+const notRead: Result<never> = { ok: false, reason: 'not read yet' }
+
+/** Chain state. Five seconds is the polite end of live, and the Uniswap API is not touched by it. */
+const STATE_POLL_MS = 5_000
+/** Logs only move when a fill or a ship lands, so they are read on a slower loop. */
+const HISTORY_POLL_MS = 60_000
+/** Local and cheap, but there is no reason to ask more often than a person can press a button. */
+const SOLVER_POLL_MS = 20_000
+/** The Uniswap key allows six requests a second. One pool_info per manual refresh, never on a render. */
+const POOL_INFO_MIN_GAP_MS = 15_000
+
+/** Grouped digits without the locale's comma, which reads badly next to hex. */
+const grouped = (value: number) => Math.round(value).toLocaleString('en-US').replace(/,/g, ' ')
+
+/** Position liquidity is a 1e18 scaled quantity, so it reads as a number rather than as a 24 digit integer. */
+const liquidityText = (value: bigint) => fmtAmount(value < 0n ? -value : value, 18, 2)
 
 function ResultCard({
   title,
@@ -66,37 +104,254 @@ function TxRequestView({ tx, expected }: { tx: TransactionRequest | null; expect
   )
 }
 
+/** One of the two figures this whole project reduces to. */
+function Figure({
+  label,
+  note,
+  children,
+  sub,
+}: {
+  label: string
+  note: string
+  children: React.ReactNode
+  sub?: React.ReactNode
+}) {
+  return (
+    <div className="figure">
+      <div className="figure-label">
+        {label}
+        <span className="note">{note}</span>
+      </div>
+      <div className="figure-value">{children}</div>
+      {sub ? <div className="figure-sub">{sub}</div> : null}
+    </div>
+  )
+}
+
+function SlacCard({
+  title,
+  denominator,
+  numerator,
+  leg,
+  strategies,
+}: {
+  title: string
+  denominator: string
+  numerator: Result<SlacNumerator>
+  leg: SlacLeg
+  strategies: number
+}) {
+  return (
+    <div className="slac-card">
+      <div className="slac-title">{title}</div>
+      <div className="slac-value">
+        {leg.ratio.ok ? (
+          <span className="num">{ratio(leg.ratio.value)}</span>
+        ) : (
+          <>
+            <span className="unavailable">undefined</span>
+            <span className="why">{leg.ratio.reason}</span>
+          </>
+        )}
+      </div>
+      <dl className="kv slac-kv">
+        <dt>provisioned</dt>
+        <dd>
+          {numerator.ok ? (
+            <>
+              {grouped(wholeTokens(numerator.value.total))}
+              <span className="unit">
+                tokens over {strategies} {strategies === 1 ? 'strategy' : 'strategies'}
+                {numerator.value.missing ? `, ${numerator.value.missing} balance unread` : ''}
+              </span>
+            </>
+          ) : (
+            <span className="unavailable">{numerator.reason}</span>
+          )}
+        </dd>
+        <dt>equity</dt>
+        <dd>
+          {leg.denominator.ok ? (
+            <>
+              {grouped(wholeTokens(leg.denominator.value))}
+              <span className="unit">tokens</span>
+            </>
+          ) : (
+            <span className="unavailable">{leg.denominator.reason}</span>
+          )}
+        </dd>
+        <dt>denominator</dt>
+        <dd className="faint">{denominator}</dd>
+      </dl>
+    </div>
+  )
+}
+
+/** A fill, as its own receipt describes it. Nothing here is copied from what the solver printed. */
+function FillReceiptView({ receipt, snapshot }: { receipt: FillReceipt; snapshot: Snapshot | null }) {
+  const symbolOf = (address: Address | null | undefined) =>
+    address && snapshot ? tokenOf(snapshot, address).symbol : ''
+  const decimalsOf = (address: Address | null | undefined) =>
+    address && snapshot ? tokenOf(snapshot, address).decimals : 18
+
+  const decrease = receipt.positionCalls.find((call) => call.kind === 'decrease')
+  const increase = receipt.positionCalls.find((call) => call.kind === 'increase')
+
+  return (
+    <>
+      <dl className="kv">
+        <dt>transaction</dt>
+        <dd>
+          <a href={txUrl(receipt.hash)} target="_blank" rel="noreferrer">
+            {receipt.hash}
+          </a>
+          <span className="unit">
+            {receipt.status === 'success' ? 'success' : 'reverted'}, block {receipt.blockNumber.toString()}, gas{' '}
+            {integer(receipt.gasUsed)}
+          </span>
+        </dd>
+        <dt>Swapped</dt>
+        <dd>
+          {receipt.swapped.ok ? (
+            <>
+              {fmtAmount(receipt.swapped.value.amountIn, decimalsOf(receipt.swapped.value.tokenIn), 6)}{' '}
+              {symbolOf(receipt.swapped.value.tokenIn)} in, {' '}
+              {fmtAmount(receipt.swapped.value.amountOut, decimalsOf(receipt.swapped.value.tokenOut), 6)}{' '}
+              {symbolOf(receipt.swapped.value.tokenOut)} out
+              <span className="unit">taker {short(receipt.swapped.value.taker, 8, 6)}</span>
+            </>
+          ) : (
+            <span className="unavailable">{receipt.swapped.reason}</span>
+          )}
+        </dd>
+        <dt>orderHash</dt>
+        <dd className="faint">{receipt.swapped.ok ? receipt.swapped.value.orderHash : 'no Swapped event'}</dd>
+      </dl>
+
+      <div className="calls">
+        <div className="call">
+          <div className="call-head">
+            <span className="call-index">1</span> preTransferOut, the unwind
+            <span className="note">the /lp/decrease payload, executed by the vault against the PositionManager</span>
+          </div>
+          <dl className="kv">
+            <dt>liquidity</dt>
+            <dd>
+              {receipt.liquidity.ok ? (
+                <>
+                  {liquidityText(receipt.liquidity.value.beforeUnwind)} to{' '}
+                  {liquidityText(receipt.liquidity.value.afterUnwind)}
+                  {decrease ? <span className="unit">delta -{liquidityText(decrease.liquidityDelta)}</span> : null}
+                </>
+              ) : (
+                <span className="unavailable">{receipt.liquidity.reason}</span>
+              )}
+            </dd>
+            <dt>released</dt>
+            <dd>
+              {receipt.unwound.ok ? (
+                <>
+                  {fmtAmount(receipt.unwound.value.released, decimalsOf(receipt.unwound.value.token), 6)}{' '}
+                  {symbolOf(receipt.unwound.value.token)}
+                  <span className="unit">
+                    against {fmtAmount(receipt.unwound.value.required, decimalsOf(receipt.unwound.value.token), 6)}{' '}
+                    owed, the surplus stays as float
+                  </span>
+                </>
+              ) : (
+                <span className="unavailable">{receipt.unwound.reason}</span>
+              )}
+            </dd>
+          </dl>
+        </div>
+        <div className="call">
+          <div className="call-head">
+            <span className="call-index">2</span> postTransferIn, the redeposit
+            <span className="note">the /lp/increase payload, same transaction, after the taker was paid</span>
+          </div>
+          <dl className="kv">
+            <dt>liquidity</dt>
+            <dd>
+              {receipt.redeposited.ok ? (
+                <>
+                  {liquidityText(receipt.redeposited.value.liquidityBefore)} to{' '}
+                  {liquidityText(receipt.redeposited.value.liquidityAfter)}
+                  {increase ? <span className="unit">delta +{liquidityText(increase.liquidityDelta)}</span> : null}
+                </>
+              ) : (
+                <span className="unavailable">{receipt.redeposited.reason}</span>
+              )}
+            </dd>
+            <dt>PoolManager</dt>
+            <dd>
+              {receipt.positionCalls.length ? (
+                <>
+                  {receipt.positionCalls.length} ModifyLiquidity
+                  <span className="unit">
+                    sent by {short(receipt.positionCalls[0].sender, 8, 6)}, the position manager
+                  </span>
+                </>
+              ) : (
+                <span className="unavailable">no ModifyLiquidity event in this receipt</span>
+              )}
+            </dd>
+          </dl>
+        </div>
+      </div>
+    </>
+  )
+}
+
 export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet: Wallet }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [snapshotError, setSnapshotError] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const [live, setLive] = useState(true)
 
-  const [amountInput, setAmountInput] = useState('1')
+  const [history, setHistory] = useState<History | null>(null)
+  const [historyError, setHistoryError] = useState<string | null>(null)
+  const [probe, setProbe] = useState<SolverProbe | null>(null)
+
+  const [amountInput, setAmountInput] = useState('1000')
   const [aToB, setAToB] = useState(true)
+  const [dryRun, setDryRun] = useState(false)
 
   const [quote, setQuote] = useState<Action<QuoteResult>>(idle)
   const [fill, setFill] = useState<Action<FillResult>>(idle)
+  const [progress, setProgress] = useState<{ steps: FillStep[]; log: string[] }>({ steps: [], log: [] })
   const [claim, setClaim] = useState<Action<{ tx: TransactionRequest | null; payload: unknown }>>(idle)
   const [unwind, setUnwind] = useState<Action<{ tx: TransactionRequest | null; payload: unknown }>>(idle)
   const [execution, setExecution] = useState<Action<{ hash: Hex }>>(idle)
   const [apiPool, setApiPool] = useState<Record<string, string | number> | null>(null)
 
+  const [receiptHash, setReceiptHash] = useState<Hex | null>(null)
+  const [ranHere, setRanHere] = useState(false)
+  const [receipt, setReceipt] = useState<Action<FillReceipt>>(idle)
+
   const chainId = config?.deployment.chainId ?? config?.chain.chainId ?? CHAIN.id
-  const wiring = useMemo(() => fillWiring(), [])
+  const wiring = useMemo(() => fillWiring(probe), [probe])
+
+  const historyRef = useRef<History | null>(null)
+  const poolInfoAt = useRef(0)
+  const poolIdRef = useRef<Hex | null>(null)
+  poolIdRef.current = snapshot?.uniswap.poolId ?? null
 
   const refresh = useCallback(
     async (options: { withApi?: boolean } = {}) => {
       if (!config) return
       setRefreshing(true)
       try {
-        const next = await readSnapshot(config)
+        // Every strategy the vault has ever shipped, so the metric above the columns is a sum over all of them
+        // and not over the one the record happens to name.
+        const hashes = historyRef.current?.strategies.map((strategy) => strategy.hash) ?? []
+        const next = await readSnapshot(config, hashes)
         setSnapshot(next)
         setSnapshotError(null)
         // A manual refresh also asks the Uniswap API about the pool, which puts a real request and a real
         // response in the network panel every time somebody presses the button. The auto refresh does not,
         // because the key is rate limited to six requests a second and a demo should not spend that.
-        if (options.withApi) {
+        if (options.withApi && Date.now() - poolInfoAt.current > POOL_INFO_MIN_GAP_MS) {
+          poolInfoAt.current = Date.now()
           const key = next.vault.keyUsed
           const result = await poolInfo({
             chainId,
@@ -118,18 +373,85 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
     [chainId, config],
   )
 
+  const scanHistory = useCallback(async () => {
+    const vault = config?.deployment.vault
+    const router = config?.deployment.router
+    if (!vault || !router) return
+    try {
+      const next = await readHistory({ vault, router })
+      historyRef.current = next
+      setHistory(next)
+      setHistoryError(next.error)
+    } catch (error) {
+      setHistoryError(reason(error))
+    }
+  }, [config])
+
   const refreshRef = useRef(refresh)
   refreshRef.current = refresh
+  const scanRef = useRef(scanHistory)
+  scanRef.current = scanHistory
 
+  // The log scan runs first, because the strategies it finds are what the snapshot then reads balances for.
   useEffect(() => {
-    void refresh()
-  }, [refresh])
+    void scanHistory().then(() => refreshRef.current())
+  }, [scanHistory])
 
   useEffect(() => {
     if (!live) return
-    const timer = setInterval(() => void refreshRef.current(), 15_000)
-    return () => clearInterval(timer)
+    const state = setInterval(() => void refreshRef.current(), STATE_POLL_MS)
+    const logs = setInterval(() => void scanRef.current(), HISTORY_POLL_MS)
+    return () => {
+      clearInterval(state)
+      clearInterval(logs)
+    }
   }, [live])
+
+  useEffect(() => {
+    let cancelled = false
+    const ask = () => {
+      void probeSolver().then((result) => {
+        if (!cancelled) setProbe(result)
+      })
+    }
+    ask()
+    const timer = setInterval(ask, SOLVER_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [])
+
+  // The last fill the deployment record names, so the panel shows a real transaction before anybody presses
+  // anything. A fill run from this page replaces it.
+  useEffect(() => {
+    const recorded = config?.deployment.lastFill?.txHash ?? null
+    if (recorded && !receiptHash) setReceiptHash(recorded)
+  }, [config, receiptHash])
+
+  useEffect(() => {
+    const router = config?.deployment.router
+    const vault = config?.deployment.vault
+    if (!receiptHash || !router || !vault) return
+    let cancelled = false
+    setReceipt({ status: 'pending' })
+    readFillReceipt(receiptHash, {
+      router,
+      vault,
+      poolManager: config?.chain.poolManager ?? config?.deployment.poolManager ?? null,
+      positionManager: config?.deployment.positionManager ?? config?.chain.positionManager ?? null,
+      poolId: poolIdRef.current,
+    })
+      .then((value) => {
+        if (!cancelled) setReceipt({ status: 'ok', value })
+      })
+      .catch((error) => {
+        if (!cancelled) setReceipt({ status: 'error', message: reason(error) })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [config, receiptHash])
 
   const decimalsA = snapshot?.tokenA.decimals.ok ? snapshot.tokenA.decimals.value : 18
   const decimalsB = snapshot?.tokenB.decimals.ok ? snapshot.tokenB.decimals.value : 18
@@ -149,6 +471,34 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
     wallet.state && snapshot?.vault.owner.ok
       ? wallet.state.address.toLowerCase() === snapshot.vault.owner.value.toLowerCase()
       : false
+
+  const slac = useMemo(() => slacOf(snapshot), [snapshot])
+
+  /** Settled volume, per input token, so a two directional book is never summed into one wrong number. */
+  const volume = useMemo(() => {
+    if (!history || !snapshot) return null
+    const total = settled(history.fills)
+    const byToken = new Map<string, bigint>()
+    for (const entry of history.fills) {
+      byToken.set(entry.tokenIn, (byToken.get(entry.tokenIn) ?? 0n) + entry.amountIn)
+    }
+    return {
+      count: total.count,
+      out: total.amountOut,
+      legs: [...byToken.entries()].map(([token, paid]) => ({
+        token: token as Address,
+        paid,
+        ...tokenOf(snapshot, token as Address),
+      })),
+    }
+  }, [history, snapshot])
+
+  const float: Result<bigint> = useMemo(() => {
+    if (!snapshot) return notRead
+    if (!snapshot.vault.floatA.ok) return snapshot.vault.floatA
+    if (!snapshot.vault.floatB.ok) return snapshot.vault.floatB
+    return ok(snapshot.vault.floatA.value + snapshot.vault.floatB.value)
+  }, [snapshot])
 
   const onQuote = useCallback(async () => {
     if (!config?.deployment.router || !orderResult) return
@@ -173,24 +523,38 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
   }, [aToB, amountInput, config, inDecimals, orderResult])
 
   const onFill = useCallback(async () => {
-    if (!wallet.state) {
-      setFill({ status: 'error', message: 'connect a wallet first, the taker is the address that pays the input' })
-      return
-    }
     setFill({ status: 'pending' })
+    setProgress({ steps: [], log: [] })
     try {
       const value = await runFill({
         amount: parseUnits(amountInput || '0', inDecimals),
         isExactIn: true,
         isAToB: aToB,
-        taker: wallet.state.address as Address,
+        taker: (wallet.state?.address ?? config?.deployment.deployer) as Address | undefined,
+        dry: dryRun,
+        onEvent: (event) => {
+          if (event.type === 'step') {
+            setProgress((current) => ({
+              ...current,
+              steps: [...current.steps, { index: event.index, label: event.label, at: Date.now() }],
+            }))
+          }
+          if (event.type === 'log') {
+            setProgress((current) => ({ ...current, log: [...current.log, event.line].slice(-400) }))
+          }
+        },
       })
       setFill({ status: 'ok', value })
+      if (value.transactionHash) {
+        setReceiptHash(value.transactionHash)
+        setRanHere(true)
+      }
       void refresh()
+      void scanHistory()
     } catch (error) {
       setFill({ status: 'error', message: reason(error) })
     }
-  }, [aToB, amountInput, inDecimals, refresh, wallet.state])
+  }, [aToB, amountInput, config, dryRun, inDecimals, refresh, scanHistory, wallet.state])
 
   const onClaimFees = useCallback(async () => {
     if (!vaultAddress) return
@@ -269,6 +633,21 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
       ? orderResult.reason
       : null
 
+  /** Where each strategy came from, and what it has settled, keyed by hash. */
+  const strategyMeta = useMemo(() => {
+    const map = new Map<string, { blockNumber: bigint; txHash: Hex; fills: number }>()
+    for (const strategy of history?.strategies ?? []) {
+      map.set(strategy.hash.toLowerCase(), { blockNumber: strategy.blockNumber, txHash: strategy.txHash, fills: 0 })
+    }
+    for (const entry of history?.fills ?? []) {
+      const meta = map.get(entry.orderHash.toLowerCase())
+      if (meta) meta.fills += 1
+    }
+    return map
+  }, [history])
+
+  const liveStrategyHash = config?.deployment.strategy?.orderHash ?? config?.deployment.strategyHash ?? null
+
   return (
     <div className="wrap dash">
       {snapshotError ? <div className="banner bad">state could not be read: {snapshotError}</div> : null}
@@ -319,13 +698,17 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
           Request a quote
         </button>
         <button
-          className="btn"
+          className="btn primary"
           onClick={() => void onFill()}
           disabled={fill.status === 'pending'}
           title={wiring.detail}
         >
-          Run a fill
+          {fill.status === 'pending' ? 'filling' : dryRun ? 'Run a fill, dry' : 'Run a fill'}
         </button>
+        <label className="toggle" title="simulate against live state and broadcast nothing, yarn fill --dry">
+          <input type="checkbox" checked={dryRun} onChange={(event) => setDryRun(event.target.checked)} />
+          dry
+        </label>
         <button className="btn" onClick={() => void onClaimFees()} disabled={claim.status === 'pending'}>
           Claim fees
         </button>
@@ -333,16 +716,106 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
         <div className="spacer" />
         <label className="toggle">
           <input type="checkbox" checked={live} onChange={(event) => setLive(event.target.checked)} />
-          auto refresh, 15 s
+          auto refresh, 5 s
         </label>
+        <span className={wiring.wired ? 'chip' : 'chip warn'} title={wiring.detail}>
+          <span className="led" /> solver {wiring.wired ? 'up' : 'down'}
+        </span>
         <span className="chip" title="block the last read was answered at">
           <span className="led" />
-          <Show result={snapshot?.blockNumber ?? { ok: false, reason: 'not read yet' }}>
-            {(value) => <>block {integer(value)}</>}
-          </Show>
+          <Show result={snapshot?.blockNumber ?? notRead}>{(value) => <>block {integer(value)}</>}</Show>
         </span>
         {snapshot ? <span className="chip">{ago(snapshot.at)}</span> : null}
       </div>
+
+      {/* the two figures ---------------------------------------------------- */}
+      <section className="headline">
+        <Figure
+          label="settled through this maker"
+          note="Swapped events on the router, summed per input token"
+          sub={
+            volume
+              ? `${volume.count} ${volume.count === 1 ? 'fill' : 'fills'}, ${fmtAmount(volume.out, outDecimals, 2)} paid back out`
+              : 'reading the logs'
+          }
+        >
+          {volume && volume.legs.length ? (
+            volume.legs.map((leg) => (
+              <div key={leg.token}>
+                <span className="num">{fmtAmount(leg.paid, leg.decimals, 2)}</span> <Unit>{leg.symbol}</Unit>
+              </div>
+            ))
+          ) : history ? (
+            <>
+              <span className="unavailable">no fill in the scanned window</span>
+              <span className="why">
+                scanned back to block {history.scannedFrom.toString()} over {history.chunks} range
+                {history.chunks === 1 ? '' : 's'}
+              </span>
+            </>
+          ) : (
+            <span className="unavailable">reading</span>
+          )}
+        </Figure>
+
+        <Figure
+          label="the float that backed it"
+          note="balanceOf the vault, both tokens, right now"
+          sub={
+            snapshot?.vault.floatA.ok && snapshot.vault.floatB.ok
+              ? `${fmtAmount(snapshot.vault.floatA.value, decimalsA, 2)} ${symbolA} , ${fmtAmount(snapshot.vault.floatB.value, decimalsB, 2)} ${symbolB}`
+              : 'not read yet'
+          }
+        >
+          <Show result={float}>
+            {(value) => (
+              <>
+                <span className="num">{fmtAmount(value, 18, 2)}</span> <Unit>tokens</Unit>
+              </>
+            )}
+          </Show>
+        </Figure>
+
+        <div className="headline-note">
+          The number on the right is what a wallet balance check sees. The volume on the left went through that
+          same wallet anyway, because the inventory sits in a Uniswap v4 position and is unwound one instruction
+          before the tokens leave, inside the transaction that pays them out.
+        </div>
+      </section>
+
+      {/* SLAC --------------------------------------------------------------- */}
+      <section className="slac">
+        <div className="slac-head">
+          <h3>SLAC</h3>
+          <span className="faint">
+            the Shared Liquidity Amplification Coefficient, 1inch's own metric, Aqua whitepaper page 4: total
+            liquidity provisioned across all strategies over the wallet equity backing it
+          </span>
+        </div>
+        <div className="slac-grid">
+          <SlacCard
+            title="against bare wallet equity"
+            denominator="ERC20 balanceOf on the vault, both tokens"
+            numerator={slac.numerator}
+            leg={slac.bare}
+            strategies={snapshot?.aqua.strategies.length ?? 0}
+          />
+          <SlacCard
+            title="against reachable equity"
+            denominator="free float plus vault.reachableFromPosition(), counted once"
+            numerator={slac.numerator}
+            leg={slac.reachable}
+            strategies={snapshot?.aqua.strategies.length ?? 0}
+          />
+        </div>
+        <p className="slac-foot">
+          The second denominator is what the custom instruction measures on chain. reachableFromPosition() is the
+          position's liquidity valued at the maker's own conversion factor, capped at maxUnwindPct and cut by the
+          haircut, and instruction 0x92 clamps every quote to the free float plus that figure inside the VM. The
+          first denominator is the one a wallet balance check would use, which is why it reads as amplification
+          that cannot exist: the inventory it is looking for is deployed, not missing.
+        </p>
+      </section>
 
       <div className="results">
         <ResultCard title="quote" state={quote}>
@@ -369,23 +842,86 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
           ) : null}
         </ResultCard>
 
-        <ResultCard title="fill" state={fill}>
-          {fill.status === 'ok' ? (
-            <dl className="kv">
-              <dt>transaction</dt>
-              <dd>
-                <a href={txUrl(fill.value.transactionHash)} target="_blank" rel="noreferrer">
-                  {fill.value.transactionHash}
-                </a>
-              </dd>
-              <dt>amountIn</dt>
-              <dd>{fmtAmount(fill.value.amountIn, inDecimals, 6)}</dd>
-              <dt>amountOut</dt>
-              <dd>{fmtAmount(fill.value.amountOut, outDecimals, 6)}</dd>
-              <dt>unwind</dt>
-              <dd>{fill.value.unwindPercent} percent of the position</dd>
-            </dl>
-          ) : null}
+        {fill.status !== 'idle' ? (
+          <div
+            className={
+              fill.status === 'ok' ? 'result ok' : fill.status === 'error' ? 'result error' : 'result pending'
+            }
+          >
+            <h4>fill</h4>
+            {progress.steps.length ? (
+              <ol className="steps">
+                {progress.steps.map((step) => (
+                  <li key={`${step.index}-${step.at}`}>
+                    <span className="num">{step.index}</span> {step.label}
+                  </li>
+                ))}
+              </ol>
+            ) : null}
+            {fill.status === 'pending' ? (
+              <div className="muted">
+                the solver is running solver/src/fill.ts, which is what yarn fill runs: a quote, two Uniswap API
+                calls, a Foundry simulation, then the broadcast.
+              </div>
+            ) : null}
+            {fill.status === 'error' ? (
+              <div className="mono" style={{ overflowWrap: 'anywhere' }}>
+                {fill.message}
+              </div>
+            ) : null}
+            {fill.status === 'ok' ? (
+              <dl className="kv">
+                <dt>{fill.value.dry ? 'simulated' : 'transaction'}</dt>
+                <dd>
+                  {fill.value.transactionHash ? (
+                    <a href={txUrl(fill.value.transactionHash)} target="_blank" rel="noreferrer">
+                      {fill.value.transactionHash}
+                    </a>
+                  ) : (
+                    <span className="faint">
+                      dry run, nothing was broadcast. The same press with the dry box clear sends it.
+                    </span>
+                  )}
+                </dd>
+                <dt>quoted</dt>
+                <dd>
+                  {fill.value.amountIn === null ? 'unavailable' : fmtAmount(fill.value.amountIn, inDecimals, 6)}{' '}
+                  {inSymbol} in,{' '}
+                  {fill.value.amountOut === null ? 'unavailable' : fmtAmount(fill.value.amountOut, outDecimals, 6)}{' '}
+                  {outSymbol} out
+                </dd>
+                <dt>unwind</dt>
+                <dd>
+                  {fill.value.unwindPercent} percent of the position
+                  <span className="unit">rounded up, liquidityPercentageToDecrease is an integer</span>
+                </dd>
+                <dt>sent from</dt>
+                <dd>
+                  {fill.value.taker ? (
+                    <Addr value={fill.value.taker} length={10} />
+                  ) : (
+                    <span className="faint">the solver key</span>
+                  )}
+                  <span className="unit">the solver signs with the key it holds, not with the browser wallet</span>
+                </dd>
+                <dt>command</dt>
+                <dd className="faint">{fill.value.command ?? 'yarn fill'}</dd>
+              </dl>
+            ) : null}
+            {progress.log.length ? (
+              <details style={{ marginTop: 10 }}>
+                <summary className="faint">solver output, {progress.log.length} lines</summary>
+                <pre className="json">{progress.log.join('\n')}</pre>
+              </details>
+            ) : null}
+          </div>
+        ) : null}
+
+        <ResultCard
+          title={ranHere ? 'the fill, read back from its receipt' : 'the last fill on this vault, from its receipt'}
+          state={receipt}
+        >
+          {receipt.status === 'ok' ? <FillReceiptView receipt={receipt.value} snapshot={snapshot} /> : null}
         </ResultCard>
 
         <ResultCard title="claim fees, /lp/claim_fees" state={claim}>
@@ -461,42 +997,67 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
               )}
             </Metric>
             <Metric label="live liquidity" note="getPositionLiquidity(uint256), 0x1efeed33" big>
-              <Show result={snapshot?.uniswap.liquidity ?? { ok: false, reason: 'not read yet' }}>
-                {(value) => <span className="num">{integer(value)}</span>}
-              </Show>
-            </Metric>
-            <Metric label="current tick" note="StateView.getSlot0">
-              <Show result={snapshot?.uniswap.tick ?? { ok: false, reason: 'not read yet' }}>
-                {(value) => <span className="num">{value}</span>}
-              </Show>
-            </Metric>
-            <Metric label="position range">
-              {snapshot?.uniswap.tickLower.ok && snapshot.uniswap.tickUpper.ok ? (
-                <span className="num">
-                  {snapshot.uniswap.tickLower.value} to {snapshot.uniswap.tickUpper.value}
-                </span>
-              ) : (
-                <Show result={snapshot?.uniswap.tickLower ?? { ok: false, reason: 'not read yet' }}>
-                  {(value) => <span className="num">{value}</span>}
-                </Show>
-              )}
-            </Metric>
-            <Metric label="pool liquidity" note="StateView.getLiquidity">
-              <Show result={snapshot?.uniswap.poolLiquidity ?? { ok: false, reason: 'not read yet' }}>
-                {(value) => <span className="num">{integer(value)}</span>}
-              </Show>
-            </Metric>
-            <Metric label="lp fee">
-              <Show result={snapshot?.uniswap.lpFee ?? { ok: false, reason: 'not read yet' }}>
+              <Show result={snapshot?.uniswap.liquidity ?? notRead}>
                 {(value) => (
-                  <span className="num">
-                    {value} <Unit>hundredths of a bip</Unit>
+                  <span className="num" title={`${value.toString()} raw`}>
+                    {liquidityText(value)}
                   </span>
                 )}
               </Show>
             </Metric>
+            <Metric label="current tick" note="StateView.getSlot0">
+              <Show result={snapshot?.uniswap.tick ?? notRead}>{(value) => <span className="num">{value}</span>}</Show>
+            </Metric>
+            <Metric label="tick bounds" note="getPoolAndPositionInfo, the position's own range">
+              {snapshot?.uniswap.tickLower.ok && snapshot.uniswap.tickUpper.ok ? (
+                <span className="num">
+                  {snapshot.uniswap.tickLower.value} to {snapshot.uniswap.tickUpper.value}
+                  <Unit>
+                    {snapshot.uniswap.tickLower.value <= -887220 && snapshot.uniswap.tickUpper.value >= 887220
+                      ? 'full range'
+                      : 'bounded'}
+                  </Unit>
+                </span>
+              ) : (
+                <Show result={snapshot?.uniswap.tickLower ?? notRead}>
+                  {(value) => <span className="num">{value}</span>}
+                </Show>
+              )}
+            </Metric>
+            <Metric label="fee tier" note="the pool key the position was opened on">
+              {snapshot ? (
+                <span className="num">
+                  {snapshot.vault.keyUsed.fee}
+                  <Unit>
+                    {(snapshot.vault.keyUsed.fee / 10_000).toFixed(2)} percent, spacing{' '}
+                    {snapshot.vault.keyUsed.tickSpacing}
+                  </Unit>
+                </span>
+              ) : (
+                <span className="unavailable">unavailable</span>
+              )}
+            </Metric>
+            <Metric label="lp fee, live" note="StateView.getSlot0, hundredths of a bip">
+              <Show result={snapshot?.uniswap.lpFee ?? notRead}>{(value) => <span className="num">{value}</span>}</Show>
+            </Metric>
+            <Metric label="pool liquidity" note="StateView.getLiquidity">
+              <Show result={snapshot?.uniswap.poolLiquidity ?? notRead}>
+                {(value) => (
+                  <span className="num" title={`${value.toString()} raw`}>
+                    {liquidityText(value)}
+                  </span>
+                )}
+              </Show>
+            </Metric>
+            <Metric label="hook" note="no hook on this pool, the maker is not one">
+              {snapshot ? (
+                <Addr value={snapshot.vault.keyUsed.hooks} />
+              ) : (
+                <span className="unavailable">unavailable</span>
+              )}
+            </Metric>
             <Metric label="position owner">
-              <Show result={snapshot?.uniswap.positionOwner ?? { ok: false, reason: 'not read yet' }}>
+              <Show result={snapshot?.uniswap.positionOwner ?? notRead}>
                 {(value) => (
                   <>
                     <Addr value={value} />
@@ -538,7 +1099,7 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
             ) : (
               <div className="empty">
                 Press Refresh state to ask /lp/pool_info about this pool. The request and the response land in the
-                panel at the bottom.
+                panel at the bottom. It is never called on a timer: the key allows six requests a second.
               </div>
             )}
 
@@ -561,32 +1122,43 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
             </span>
           </div>
           <div className="column-body">
-            <Metric label={`free float, ${symbolA}`} note="balanceOf the vault">
-              <Show result={snapshot?.vault.floatA ?? { ok: false, reason: 'not read yet' }}>
-                {(value) => <span className="num">{fmtAmount(value, decimalsA)}</span>}
+            <Metric label={`free float, ${symbolA}`} note="balanceOf the vault" big>
+              <Show result={snapshot?.vault.floatA ?? notRead}>
+                {(value) => <span className="num">{fmtAmount(value, decimalsA, 4)}</span>}
               </Show>
             </Metric>
-            <Metric label={`free float, ${symbolB}`} note="balanceOf the vault">
-              <Show result={snapshot?.vault.floatB ?? { ok: false, reason: 'not read yet' }}>
-                {(value) => <span className="num">{fmtAmount(value, decimalsB)}</span>}
+            <Metric label={`free float, ${symbolB}`} note="balanceOf the vault" big>
+              <Show result={snapshot?.vault.floatB ?? notRead}>
+                {(value) => <span className="num">{fmtAmount(value, decimalsB, 4)}</span>}
               </Show>
             </Metric>
 
             <div className="subhead">URC-3, hook TVL and effective liquidity reporting</div>
-            <Metric label="reserves" note="getReserves(PoolKey), token0 and token1">
-              <Show result={snapshot?.vault.reserves ?? { ok: false, reason: 'not read yet' }}>
+            <Metric
+              label="reserves"
+              note={
+                snapshot
+                  ? `getReserves(PoolKey), ${tokenOf(snapshot, snapshot.vault.keyUsed.currency0).symbol} and ${tokenOf(snapshot, snapshot.vault.keyUsed.currency1).symbol}`
+                  : 'getReserves(PoolKey)'
+              }
+            >
+              <Show result={snapshot?.vault.reserves ?? notRead}>
                 {([token0, token1]) => (
                   <span className="num">
-                    {fmtAmount(token0, decimalsA)} / {fmtAmount(token1, decimalsB)}
+                    {fmtAmount(token0, snapshot ? tokenOf(snapshot, snapshot.vault.keyUsed.currency0).decimals : 18, 2)}
+                    {' / '}
+                    {fmtAmount(token1, snapshot ? tokenOf(snapshot, snapshot.vault.keyUsed.currency1).decimals : 18, 2)}
                   </span>
                 )}
               </Show>
             </Metric>
-            <Metric label="effective liquidity" note="getEffectiveLiquidity(PoolKey), token0 and token1">
-              <Show result={snapshot?.vault.effectiveLiquidity ?? { ok: false, reason: 'not read yet' }}>
+            <Metric label="effective liquidity" note="getEffectiveLiquidity(PoolKey), what one fill can reach">
+              <Show result={snapshot?.vault.effectiveLiquidity ?? notRead}>
                 {([token0, token1]) => (
                   <span className="num">
-                    {fmtAmount(token0, decimalsA)} / {fmtAmount(token1, decimalsB)}
+                    {fmtAmount(token0, snapshot ? tokenOf(snapshot, snapshot.vault.keyUsed.currency0).decimals : 18, 2)}
+                    {' / '}
+                    {fmtAmount(token1, snapshot ? tokenOf(snapshot, snapshot.vault.keyUsed.currency1).decimals : 18, 2)}
                   </span>
                 )}
               </Show>
@@ -610,12 +1182,12 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
 
             <div className="subhead">what one fill may lean on</div>
             <Metric label="reachableFromPosition" note="the figure instruction 0x92 clamps to" big>
-              <Show result={snapshot?.vault.reachable ?? { ok: false, reason: 'not read yet' }}>
-                {(value) => <span className="num">{fmtAmount(value, decimalsB)}</span>}
+              <Show result={snapshot?.vault.reachable ?? notRead}>
+                {(value) => <span className="num">{fmtAmount(value, decimalsB, 2)}</span>}
               </Show>
             </Metric>
             <Metric label="maxUnwindPct" note="largest share of the position one fill may unwind">
-              <Show result={snapshot?.vault.maxUnwindPct ?? { ok: false, reason: 'not read yet' }}>
+              <Show result={snapshot?.vault.maxUnwindPct ?? notRead}>
                 {(value) => (
                   <span className="num">
                     {value} <Unit>percent</Unit>
@@ -624,7 +1196,7 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
               </Show>
             </Metric>
             <Metric label="haircutBps" note="safety margin on the deployed leg">
-              <Show result={snapshot?.vault.haircutBps ?? { ok: false, reason: 'not read yet' }}>
+              <Show result={snapshot?.vault.haircutBps ?? notRead}>
                 {(value) => (
                   <span className="num">
                     {value} <Unit>bps</Unit>
@@ -633,7 +1205,7 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
               </Show>
             </Metric>
             <Metric label="unitsPerLiquidityE18" note="tokenOut units per unit of position liquidity">
-              <Show result={snapshot?.vault.unitsPerLiquidityE18 ?? { ok: false, reason: 'not read yet' }}>
+              <Show result={snapshot?.vault.unitsPerLiquidityE18 ?? notRead}>
                 {(value) => <span className="num">{integer(value)}</span>}
               </Show>
             </Metric>
@@ -657,7 +1229,7 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
               )}
             </Metric>
             <Metric label="owner">
-              <Show result={snapshot?.vault.owner ?? { ok: false, reason: 'not read yet' }}>
+              <Show result={snapshot?.vault.owner ?? notRead}>
                 {(value) => (
                   <>
                     <Addr value={value} />
@@ -673,14 +1245,12 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
           <div className="column-head">
             <h3>Aqua, official</h3>
             <span className="who">
-              <Show result={snapshot?.aqua.address ?? { ok: false, reason: 'not read yet' }}>
-                {(value) => <Addr value={value} />}
-              </Show>
+              <Show result={snapshot?.aqua.address ?? notRead}>{(value) => <Addr value={value} />}</Show>
             </span>
           </div>
           <div className="column-body">
             <Metric label="router AQUA()" note="the one line that proves the official contract does the work">
-              <Show result={snapshot?.aqua.routerAqua ?? { ok: false, reason: 'not read yet' }}>
+              <Show result={snapshot?.aqua.routerAqua ?? notRead}>
                 {(value) => (
                   <>
                     <Addr value={value} />
@@ -692,7 +1262,7 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
               </Show>
             </Metric>
             <Metric label="custom opcode" note="OPCODE_UNWIND_PRICED_BALANCE_OUT()">
-              <Show result={snapshot?.aqua.opcode ?? { ok: false, reason: 'not read yet' }}>
+              <Show result={snapshot?.aqua.opcode ?? notRead}>
                 {(value) => (
                   <span className="num">
                     {value.toString()} <Unit>0x{value.toString(16)}</Unit>
@@ -700,58 +1270,112 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
                 )}
               </Show>
             </Metric>
-            <Metric label="app" note="the router the strategy was shipped to">
+            <Metric label="app" note="the router the strategies were shipped to">
               {snapshot?.aqua.app ? <Addr value={snapshot.aqua.app} /> : <span className="unavailable">unavailable</span>}
             </Metric>
 
-            <div className="subhead">strategies and raw balances</div>
+            <div className="subhead">
+              every strategy this vault has shipped
+              {history ? (
+                <span className="note">
+                  Shipped events on the vault, blocks {history.scannedFrom.toString()} to {history.head.toString()}
+                </span>
+              ) : null}
+            </div>
+            {historyError ? (
+              <div className="empty">
+                <span className="unavailable">the log scan stopped early</span>
+                <span className="why">{historyError}</span>
+              </div>
+            ) : null}
             {snapshot?.aqua.strategies.length ? (
-              snapshot.aqua.strategies.map((strategy) => (
-                <div className="strategy" key={strategy.hash}>
-                  <div className="hash">{strategy.hash}</div>
-                  {strategy.balances.map((balance) => (
-                    <Metric
-                      key={balance.token}
-                      label={balance.symbol}
-                      note="rawBalances(maker, app, strategyHash, token)"
-                    >
-                      <Show result={balance.raw}>
-                        {(value) => (
-                          <span className="num">
-                            {fmtAmount(
-                              value.balance,
-                              balance.token.toLowerCase() === snapshot.tokenA.address.toLowerCase()
-                                ? decimalsA
-                                : decimalsB,
-                            )}
-                            <Unit>tokensCount {value.tokensCount}</Unit>
-                          </span>
-                        )}
-                      </Show>
-                    </Metric>
-                  ))}
-                </div>
-              ))
+              snapshot.aqua.strategies.map((strategy) => {
+                const meta = strategyMeta.get(strategy.hash.toLowerCase())
+                const isLive = liveStrategyHash?.toLowerCase() === strategy.hash.toLowerCase()
+                const docked = strategy.balances.some((balance) => balance.raw.ok && balance.raw.value.tokensCount === 255)
+                const subtotal = strategy.balances.reduce(
+                  (total, balance) => total + (balance.raw.ok ? balance.raw.value.balance : 0n),
+                  0n,
+                )
+                return (
+                  <div className="strategy" key={strategy.hash}>
+                    <div className="strategy-head">
+                      <span className="hash" title={strategy.hash}>
+                        {short(strategy.hash, 12, 8)}
+                      </span>
+                      {isLive ? <span className="chip">quoting now</span> : null}
+                      {docked ? <span className="chip warn">docked</span> : null}
+                    </div>
+                    <div className="strategy-meta">
+                      {meta ? (
+                        <>
+                          block {meta.blockNumber.toString()},{' '}
+                          <a href={txUrl(meta.txHash)} target="_blank" rel="noreferrer" className="mono">
+                            {short(meta.txHash, 8, 6)}
+                          </a>
+                          {meta.fills
+                            ? ` , ${meta.fills} ${meta.fills === 1 ? 'fill' : 'fills'} settled`
+                            : ' , no fill settled on it'}
+                        </>
+                      ) : (
+                        <>named by deployments/sepolia.json, shipped outside the scanned log window</>
+                      )}
+                    </div>
+                    {strategy.balances.map((balance) => (
+                      <Metric
+                        key={balance.token}
+                        label={balance.symbol}
+                        note="rawBalances(maker, app, strategyHash, token)"
+                      >
+                        <Show result={balance.raw}>
+                          {(value) => (
+                            <span className="num">
+                              {fmtAmount(
+                                value.balance,
+                                balance.token.toLowerCase() === snapshot.tokenA.address.toLowerCase()
+                                  ? decimalsA
+                                  : decimalsB,
+                                2,
+                              )}
+                              <Unit>tokensCount {value.tokensCount}</Unit>
+                            </span>
+                          )}
+                        </Show>
+                      </Metric>
+                    ))}
+                    <div className="strategy-total">
+                      provisioned <span className="num">{fmtAmount(subtotal, 18, 0)}</span> tokens
+                    </div>
+                  </div>
+                )
+              })
             ) : (
               <div className="empty">
-                No strategy hash published yet. The setup script writes it to deployments/sepolia.json when the
-                vault ships the strategy, and this column reads the balances straight out of the official Aqua.
+                No strategy found. The vault emits Shipped when it opens one, and this column reads the balances
+                straight out of the official Aqua under that hash.
               </div>
             )}
 
             <div className="subhead">fill orchestration</div>
-            <Metric label="Run a fill" note={wiring.wired ? undefined : 'not wired yet'}>
+            <Metric label="Run a fill" note={wiring.wired ? solverUrl() : 'no solver answering'}>
               {wiring.wired ? (
                 <span className="chip">
                   <span className="led" /> wired
                 </span>
               ) : (
                 <>
-                  <span className="unavailable">stubbed</span>
+                  <span className="unavailable">not wired</span>
                   <span className="why">{wiring.detail}</span>
                 </>
               )}
             </Metric>
+            {probe?.ok && probe.busy ? (
+              <Metric label="solver">
+                <span className="chip warn">
+                  <span className="led" /> a fill is already running
+                </span>
+              </Metric>
+            ) : null}
             {config?.deployment.router ? (
               <Metric label="router">
                 <a href={addressUrl(config.deployment.router)} target="_blank" rel="noreferrer" className="mono">

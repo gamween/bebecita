@@ -21,8 +21,11 @@ export interface FillRequest {
   isExactIn: boolean
   /** True means token A in and token B out, matching the `IS_A_TO_B` taker trait. */
   isAToB: boolean
-  /** Address that pays the input and receives the output. */
-  taker: Address
+  /**
+   * The address the caller would like to fill as. Informational: the solver signs with the key that owns the
+   * vault and sends from it, and the result says which address that turned out to be.
+   */
+  taker?: Address
   /** Simulate against live state and broadcast nothing, the same as `yarn fill --dry`. */
   dry?: boolean
   /** Called as the solver reports progress, so the page can render a step while the next one runs. */
@@ -174,7 +177,7 @@ async function postFillToSolver(base: string, request: FillRequest): Promise<Fil
         amount: request.amount.toString(),
         isExactIn: request.isExactIn,
         isAToB: request.isAToB,
-        taker: request.taker,
+        ...(request.taker ? { taker: request.taker } : {}),
         dry: request.dry === true,
       }),
     })
@@ -182,6 +185,15 @@ async function postFillToSolver(base: string, request: FillRequest): Promise<Fil
     throw new FillNotWiredError(
       `no solver answered at ${base}: ${(error as Error).message}. Start it with yarn solver:serve at the ` +
         'repository root, it holds the key that signs the swap.',
+    )
+  }
+
+  // A dev server with no solver behind it answers 404, and a proxy that cannot reach one answers 502 or 503.
+  // Neither is a failed fill, both are the absence of a solver, and the difference matters on screen.
+  if ([404, 501, 502, 503, 504].includes(response.status)) {
+    throw new FillNotWiredError(
+      `nothing is serving ${base}/fill, it answered ${response.status}. Start the solver with yarn solver:serve ` +
+        'at the repository root, it holds the key that signs the swap.',
     )
   }
 
