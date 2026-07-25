@@ -14,6 +14,16 @@
 const LP_HOST = 'https://liquidity.api.uniswap.org'
 const TRADE_HOST = 'https://trade-api.gateway.uniswap.org/v1'
 
+/**
+ * Sent on every trade host call the rebalance makes.
+ *
+ * With it, `/quote` returns `permitData: null` and `/check_approval` names the proxy Universal Router as the
+ * spender instead of Permit2, so the whole swap is an ERC20 approve followed by one execute. A script holding a
+ * raw key can sign EIP-712, so this is not a hard requirement the way `generatePermitAsTransaction` is on the
+ * LP side, but it removes a signing step and a typed data domain from a path that runs unattended.
+ */
+const PERMIT2_DISABLED = { 'x-permit2-disabled': 'true' } as const
+
 export type Protocol = 'V2' | 'V3' | 'V4'
 
 export interface UniswapConfig {
@@ -61,6 +71,33 @@ export interface CreatePositionResponse {
   gasFee?: string
 }
 
+/** One pool of a returned route. The rebalance checks this against the pool that funds the book. */
+export interface RoutePool {
+  type: string
+  address: string
+  fee?: string
+  liquidity?: string
+  sqrtRatioX96?: string
+  amountIn?: string
+  amountOut?: string
+}
+
+/** What `POST /quote` answers on the trade host, narrowed to the classic fields a swap needs. */
+export interface TradeQuoteResponse {
+  requestId: string
+  routing: string
+  /** Always `null` when `x-permit2-disabled: true` was sent, which is the point of sending it. */
+  permitData: unknown | null
+  quote: {
+    input: { amount: string; token: string }
+    output: { amount: string; token: string; minimumAmount?: string }
+    priceImpact?: number
+    route?: RoutePool[][]
+    routeString?: string
+    [k: string]: unknown
+  }
+}
+
 /** Thrown with the body attached, because the gateway explains itself in the payload rather than the status. */
 export class UniswapApiError extends Error {
   constructor(
@@ -84,7 +121,7 @@ export class UniswapClient {
     return this.rateLimitRemaining
   }
 
-  private async post<T>(host: string, path: string, body: unknown): Promise<T> {
+  private async post<T>(host: string, path: string, body: unknown, headers: Record<string, string> = {}): Promise<T> {
     const response = await fetch(`${host}${path}`, {
       method: 'POST',
       headers: {
@@ -92,6 +129,7 @@ export class UniswapClient {
         // The header validator is strict: these two must contain nothing but the media type.
         'Content-Type': 'application/json',
         Accept: 'application/json',
+        ...headers,
       },
       body: JSON.stringify(body),
     })
@@ -293,6 +331,96 @@ export class UniswapClient {
       tokenId: String(params.tokenId),
       simulateTransaction: false,
     })
+  }
+
+  // -------------------------------------------------------------------
+  // The trade host. Used by `yarn rebalance` only, and never inside a fill.
+  // -------------------------------------------------------------------
+
+  /**
+   * Price a swap. `POST /quote` on the TRADE host, which is the versioned one, not the LP host.
+   *
+   * `x-permit2-disabled: true` is the header that makes this usable from a script with no signing ceremony.
+   * The document says it plainly: with it set, `permitData` comes back `null` and the header is forwarded to
+   * the routing layer so the gas simulation targets the proxy Universal Router. What is left is the pattern the
+   * spec calls "direct approval-then-swap": one ERC20 `approve` to the address `/check_approval` names, then
+   * the transaction `/swap` builds. No EIP-712, no typed data, no signature.
+   *
+   * `protocols: ['V4']` is not a preference here, it is an assertion. The only market for these two tokens is
+   * the v4 pool this project created, and the caller checks the returned route names that pool.
+   */
+  async tradeQuote(params: {
+    swapper: string
+    tokenIn: string
+    tokenOut: string
+    amountIn: string
+    slippageTolerancePct?: number
+  }): Promise<TradeQuoteResponse> {
+    return this.post(
+      TRADE_HOST,
+      '/quote',
+      {
+        type: 'EXACT_INPUT',
+        amount: params.amountIn,
+        tokenInChainId: this.config.chainId,
+        tokenOutChainId: this.config.chainId,
+        tokenIn: params.tokenIn,
+        tokenOut: params.tokenOut,
+        swapper: params.swapper,
+        slippageTolerance: params.slippageTolerancePct ?? 1,
+        protocols: [this.config.protocol],
+        routingPreference: 'BEST_PRICE',
+      },
+      PERMIT2_DISABLED,
+    )
+  }
+
+  /**
+   * Turn a quote into calldata. `POST /swap`, same host, same header.
+   *
+   * The `quote` field takes the quote object from `/quote` back verbatim, not a rebuilt one and not the whole
+   * response envelope: the request is `{ quote: response.quote }`. `signature` and `permitData` are the two
+   * fields the spec says to send only when `/quote` returned a permit, so with Permit2 disabled they are
+   * absent rather than null.
+   *
+   * `simulateTransaction` stays false. A simulation would run before the ERC20 approval exists and would fail
+   * for a reason that has nothing to do with the trade.
+   */
+  async tradeSwap(params: { quote: unknown }): Promise<{ requestId: string; swap: TransactionRequest }> {
+    return this.post(
+      TRADE_HOST,
+      '/swap',
+      { quote: params.quote, simulateTransaction: false, refreshGasPrice: true },
+      PERMIT2_DISABLED,
+    )
+  }
+
+  /**
+   * Who to approve, and for how much, before a swap.
+   *
+   * This is the trade host's `/check_approval`, a different operation from the LP host's `/lp/check_approval`
+   * used at setup: it takes one token rather than a pair, and it answers with a single transaction rather than
+   * an ordered list. With `x-permit2-disabled: true` it names the proxy Universal Router as the spender
+   * instead of Permit2, which is how the spender is learned from the API rather than hardcoded here.
+   *
+   * `approval` is `null` when the allowance is already sufficient, which is the normal answer on a second run.
+   */
+  async tradeApproval(params: { walletAddress: string; token: string; amount: string }): Promise<{
+    requestId: string
+    approval: TransactionRequest | null
+    cancel: TransactionRequest | null
+  }> {
+    return this.post(
+      TRADE_HOST,
+      '/check_approval',
+      {
+        walletAddress: params.walletAddress,
+        token: params.token,
+        amount: params.amount,
+        chainId: this.config.chainId,
+      },
+      PERMIT2_DISABLED,
+    )
   }
 
   /** Reachability probe against the trade host, used by the gate zero check. */
