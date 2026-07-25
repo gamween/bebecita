@@ -74,6 +74,42 @@ only invariant of the core suite that cannot be skipped, holds structurally rath
 Its position guard, `require(amountIn == 0 || amountOut == 0)`, mirrors `Decay`, `Fee` and `MinRate`, and
 forces it to sit before the curve.
 
+## The curve
+
+`XYCConcentrateSwap`, opcode `0x51`, dispatched by `AquaOpcodes` itself. The program is
+`[0x92 unwind][0x51 concentrate][0x02 salt]`, and the order of the first two is forced from both ends: `0x92`
+requires both amount registers to still be zero, and `0x51` is terminal and reads `balanceOut` after the clamp.
+
+Two things follow from choosing it over `XYCSwap`, `0x50`.
+
+`0x50` never clamps its own output. Instruction `0x92` exists to lower `balanceOut` to what the position can
+release, and `0x50` will happily be asked for more than that: in exact-out it computes
+`amountIn = ceilDiv(amountOut * balanceIn, balanceOut - amountOut)`, which underflows above the balance and
+divides by zero at it, so the taker gets an arithmetic panic with nothing in the revert data naming the cause.
+`XYCConcentrate` clamps on `balanceOut` and re-solves the other side for the clamped amount, in both
+directions, which turns that moment into an exact partial. This is not a tolerated accident:
+`TakerTraitsLib.validate` requires `takerAmount >= amountIn` on exact-in and `takerAmount >= amountOut` on
+exact-out, never equality, so the sponsor's own validation is written for partial fills.
+
+Its two arguments are the position. `sqrtPriceMin` and `sqrtPriceMax` come from the position's tick bounds and
+the live `sqrtRatioX96` of `POST /lp/pool_info`, and they are compiled into the program bytes at ship time.
+The book's curve is the range of the Uniswap position funding it, and a maker who re-ranges the position
+re-ranges the book.
+
+The one caveat, stated rather than hidden. This position is full range and full range does not survive the
+instruction's 1e18 fixed point: `sqrt(1.0001^-887220)` is `5.4e-20`, which truncates to zero, and
+`XYCConcentrateArgsBuilder.build2D` rejects a zero lower bound. The shipped bounds are therefore the position's
+range clamped to the widest window the format carries, a factor of `1e9` on the sqrt price either side of the
+live spot, ticks `-414486` to `414486`. At that width the virtual reserves add a billionth of the real ones, so
+the curve is constant product to nine significant digits: the clamp is what changed, not the price. The
+consequence to know is that the exact-in half of the clamp is out of reach on a full range book, because a
+constant product curve never pays out its whole reserve, and that the exact-out half is not.
+
+The conversion from tick to sqrt price happens in the solver, in double precision, and `solver/src/aqua.ts`
+says why: it defines the shape of a curve rather than settling anything, the value is recorded in
+`deployments/sepolia.json` and rebuilt from that record rather than recomputed, and the tokens behind any
+amount it prices are checked against the realised balance delta by the vault's first guard.
+
 ## The vault and the trust model
 
 The withdrawal calldata comes from the taker, once per fill, because the Uniswap API builds it against live
