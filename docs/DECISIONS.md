@@ -59,11 +59,20 @@ in range, which is the only way it earns fees. In the other ordering the redepos
 forcing an out of range position that earns nothing and guts the thesis. The solver is our own taker contract,
 so we control the bit.
 
-## Traits built with the sponsor's own builders
+## Traits built with the sponsor's own builders, then ported under a byte for byte test
 
 `MakerTraitsLib.build` and `TakerTraitsLib.build` both exist. Earlier planning treated hand encoding the 22
 byte traits header and its eleven slices as the riskiest line item in the project. It is not a line item at
 all: use their builders in Solidity and the whole class of one byte offset bugs disappears.
+
+That held until the backend had to go. `TakerTraitsLib.build` is `internal pure`, so it only runs inside a
+contract, and it was the only reason a fill needed a process at all: everything else the local server did was
+already doable in a tab. So the builder is ported to TypeScript in `solver/src/takerTraits.ts`, and the risk
+that made the original decision right is paid for differently, with a test rather than with a process.
+`contracts/test/TakerTraits.t.sol` calls the sponsor's library on twelve argument shapes and asserts byte
+equality against the port, then round trips the live fill shape through the library's own slice readers.
+`contracts/script/Fill.s.sol` stays as the Solidity reference that diff is taken against. `MakerTraitsLib` is
+untouched: orders are built once, off the fill path, and there is no reason to port that too.
 
 ## Extension style: subclass, do not fork
 

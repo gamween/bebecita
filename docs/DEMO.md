@@ -47,9 +47,14 @@ three lines further down the trace.
 
 ## 1:20 to 2:20, the fill, where both legs become visible
 
-Run the solver. On the left, live: `POST /lp/decrease` goes out to `liquidity.api.uniswap.org` and comes back
-with its calldata, then `POST /lp/increase`. "Those two calldatas just left. They are going into two slices of
-the taker traits."
+Press **Run a fill**, from the dashboard, with a wallet connected. On the left, live: `POST /lp/decrease` goes
+out to `liquidity.api.uniswap.org` and comes back with its calldata, then `POST /lp/increase`. "Those two
+calldatas just left this browser tab. They are going into two slices of the taker traits."
+
+Worth saying out loud once, because a judge will ask: there is no backend. The taker traits are encoded in
+TypeScript, the swap is signed by the connected wallet, and the only thing running besides the tab is the dev
+server holding the Uniswap key. `TestERC20.mint` is public, so hand them the laptop and let them fill it
+themselves from their own wallet.
 
 In the middle, one transaction. Walk the trace slowly:
 
