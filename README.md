@@ -208,6 +208,8 @@ forge script contracts/script/Deploy.s.sol --rpc-url sepolia --broadcast --verif
 yarn setup                    # pool, position, vault custody, all through the LP API
 yarn aqua                     # opens the strategy the book quotes
 yarn fill                     # one fill on Sepolia, end to end
+yarn inventory                # what those fills did to the maker's inventory
+yarn rebalance                # trade the inventory home, between fills
 ```
 
 `yarn setup` is resumable and reads `deployments/sepolia.json` as its state: a position already recorded
@@ -251,6 +253,34 @@ The first fill this project ever ran is
 1,000 bBRAVO for 23.72 bALPHA. The price is not a market move, it is the shipped book: that fill quoted before
 the input side was shipped from `reachableFromPosition` instead of generously, which is what brought the book
 back to something a human can read.
+
+## Inventory, and trading it home
+
+```bash
+yarn inventory                # what every fill did to the maker's inventory, read off its own receipt
+yarn rebalance                # sell the surplus, put both sides back into the position
+yarn rebalance --dry          # size it against live state, call the API for real, broadcast nothing
+```
+
+A fill is not balance neutral for the maker and it never was. `/lp/decrease` returns both tokens pro rata, the
+fill pays the taker in one of them and is paid in the other, and the redeposit is two sided and therefore
+capped by whichever token the maker keeps selling. Fifteen fills put **39.85%** of the removed liquidity back,
+left **23,947 bBRAVO** of free float in the vault, and took the position from 100,000 of liquidity to 92,140.
+That is what one directional flow does to any market maker rather than something this design does to itself,
+and the answer has always been the same one: trade the inventory home, and charge a spread that covers doing
+so.
+
+| One rebalance on Sepolia | [`0x6c8f9009…`](https://sepolia.etherscan.io/tx/0x6c8f9009f891da976373d016dbce77fc1547416a812dd6499d1093f6f4707f8d) |
+|---|---|
+| Float | 21,859.61 bBRAVO and 2.07 bALPHA, down to 35.73 and 0.93 |
+| Position | 92,140.39 of liquidity back to 102,473.62, which is 102.47% of what it opened with |
+| Sold | 10,363.05 bBRAVO for 9,290.22 bALPHA, `POST /quote` then `POST /swap` on the trade host, `x-permit2-disabled: true` so an approve and an execute replace any signature |
+| Where | at the owner, on the `sweep` the vault already had, between fills and never in the settlement path |
+
+The size is a single sided zap rather than a dump: selling the whole surplus would leave the vault holding one
+token against a pool priced where that sale left it, which is the same trap one level down. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section Inventory, for what the rebalance costs and for the one
+maker parameter it moves, and [docs/DECISIONS.md](docs/DECISIONS.md) for why this is not inside the fill.
 
 ## Frontend
 
