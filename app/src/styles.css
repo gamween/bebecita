@@ -882,6 +882,16 @@ td.addr {
   border-top: 1px solid var(--line);
 }
 
+.subhead .note {
+  display: block;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+  color: var(--ink-faint);
+  opacity: 0.85;
+  margin-top: 2px;
+}
+
 .strategy {
   border: 1px solid var(--line);
   border-radius: var(--radius);
