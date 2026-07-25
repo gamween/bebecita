@@ -156,6 +156,47 @@ contract BebecitaTest is Test {
         assertEq(swappedOut, quotedOut, "amountOut diverged between quote and swap");
     }
 
+    /// @notice Shipping the input side near the reachable figure is what makes the book quote a readable price.
+    /// @dev `XYCSwap` is constant product, and the instruction lowers `balanceOut` only, so the quote is
+    ///      roughly `balanceOut / balanceIn`. Ship both sides generously and the book quotes a fortieth of
+    ///      parity, which reads as broken. Ship the input side just above what the position can release and
+    ///      the price comes back, while the output side stays generous so that running without the
+    ///      instruction still overstates depth on an ordinary sized fill rather than only on a huge one.
+    function test_AsymmetricShipping_QuotesNearParityWhileKeepingTheOverstatement() public {
+        ISwapVM.Order memory order = _buildOrder(true);
+
+        uint256 reachable = vault.reachableFromPosition();
+        uint256 inputSide = reachable * 105 / 100;
+        uint256 outputSide = reachable * 40;
+
+        address[] memory tokens = new address[](2);
+        tokens[0] = address(token0);
+        tokens[1] = address(token1);
+
+        uint256[] memory amounts = new uint256[](2);
+        amounts[0] = inputSide;
+        amounts[1] = outputSide;
+
+        vault.ship(address(router), abi.encode(order), tokens, amounts);
+
+        // Size the fill relative to the depth, the way the live book is used: a hundred tokens against
+        // 23,750 reachable. A fixed size against this test's much smaller position would be a fifth of the
+        // pool, and constant product slippage rather than the shipped ratio would decide the result.
+        uint256 amountIn = reachable / 250;
+        bytes memory takerData = _buildTakerData(new bytes(0), new bytes(0));
+        (, uint256 clamped,) = ISwapVM(address(router)).quote(order, amountIn, takerData);
+
+        // Near parity: within twenty percent of one for one, where symmetric generous shipping gave 0.025.
+        assertGt(clamped, amountIn * 80 / 100, "quote collapsed, the input side is shipped too generously");
+        assertLt(clamped, amountIn * 120 / 100, "quote above parity, the output side is shipped too thin");
+
+        // And the output side is still generous enough that dropping the instruction overstates by a lot.
+        ISwapVM.Order memory bare = _buildOrder(false);
+        vault.ship(address(router), abi.encode(bare), tokens, amounts);
+        (, uint256 unclamped,) = ISwapVM(address(router)).quote(bare, amountIn, takerData);
+        assertGt(unclamped, clamped * 10, "without the instruction the quote must overstate by an order of magnitude");
+    }
+
     // ---------------------------------------------------------------------
     // The settlement loop
     // ---------------------------------------------------------------------

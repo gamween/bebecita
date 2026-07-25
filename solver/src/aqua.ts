@@ -57,21 +57,36 @@ const MAX_UNWIND_PCT = 25
 const UNITS_PER_LIQUIDITY_E18 = 10n ** 18n
 
 /**
- * Virtual balance shipped per token.
+ * Virtual balances shipped, asymmetric on purpose.
  *
- * Generous on purpose. Aqua performs no solvency check, so this number is a quote-side ceiling and nothing
- * else, and instruction `0x92` is what brings the output side back down to what the position can genuinely
- * release inside the fill. A modest number here would hide the whole problem the project exists to solve:
- * with a million shipped per side and 23,750 reachable, an order run without the instruction overstates its
- * depth by a factor of forty on every fill, not only on large ones.
+ * `XYCSwap` is constant product over `(balanceIn, balanceOut)`, and instruction `0x92` lowers `balanceOut`
+ * only. So the book quotes roughly `balanceOut / balanceIn`, and the two sides do different jobs.
  *
- * The price pays for that. `XYCSwap` is constant product over `(balanceIn, balanceOut)`, and the instruction
- * lowers `balanceOut` only, so the book quotes roughly `reachable / shipped` per unit, measured at 0.0237
- * bBRAVO per bALPHA on the live strategy. Bringing this down to about 25,000 would quote near parity and keep
- * the collateral story intact, at the cost of a much weaker demonstration of the failure it prevents. The knob
- * is here, in one place, and a re-run picks a fresh salt so changing it is one command.
+ * The OUTPUT side is shipped generously. Aqua performs no solvency check, so that number is a quote-side
+ * ceiling and nothing else, and it is exactly what makes the instruction's absence bite: run the same program
+ * without `0x92` and it overstates its depth by a large factor on every fill, not only on large ones, so the
+ * hook's shortfall guard catches an ordinary sized order rather than an exotic one.
+ *
+ * The INPUT side is shipped just above what the position can actually release. That is what brings the price
+ * back to something a human can read: with the instruction clamping the output to `reachable`, the quote lands
+ * near parity instead of at the 0.0237 that a symmetric generous shipping produced.
+ *
+ * Both figures are derived from `vault.reachableFromPosition()` rather than hardcoded, so the relationship
+ * survives a change of position size, of `maxUnwindPct`, or of the haircut.
+ *
+ * The consequence to know: the reverse direction quotes poorly, because its input side is the generous one.
+ * The demo fills one direction, and the reverse is not part of it.
  */
-const SHIPPED_BALANCE = 1_000_000n * 10n ** 18n
+const INPUT_SHIPPED_NUMERATOR = 105n
+const INPUT_SHIPPED_DENOMINATOR = 100n
+const OUTPUT_SHIPPED_MULTIPLE = 40n
+
+/** Splits the two shipped figures according to which token the demo direction pays out. */
+function shippedAmounts(reachable: bigint, token0: Address, demoTokenOut: Address): [bigint, bigint] {
+  const input = (reachable * INPUT_SHIPPED_NUMERATOR) / INPUT_SHIPPED_DENOMINATOR
+  const output = reachable * OUTPUT_SHIPPED_MULTIPLE
+  return token0.toLowerCase() === demoTokenOut.toLowerCase() ? [output, input] : [input, output]
+}
 
 export interface Order {
   maker: Address
@@ -282,11 +297,28 @@ async function main() {
   const [token0, token1] =
     tokenA.toLowerCase() < tokenB.toLowerCase() ? [tokenA, tokenB] : [tokenB, tokenA]
 
+  // The clamp target, read from the chain rather than assumed, so the shipped figures track the position.
+  const reachable = await publicClient.readContract({
+    address: vault,
+    abi: parseAbi(['function reachableFromPosition() view returns (uint256)']),
+    functionName: 'reachableFromPosition',
+  })
+  if (reachable === 0n) {
+    throw new Error('reachableFromPosition is 0, the vault owns no position liquidity yet, run yarn setup')
+  }
+  // Direction. The taker's `isAToB` bit makes tokenIn the lower sorted address, so the output side of the
+  // demo direction is token1. Verified against a live quote: shipping the generous side as the input instead
+  // reproduces the 0.025 price this change exists to fix.
+  const [amount0, amount1] = shippedAmounts(reachable, token0, token1)
+  info('reachable       ', reachable)
+  info('shipping token0 ', amount0)
+  info('shipping token1 ', amount1)
+
   const hash = await wallet.writeContract({
     address: vault,
     abi: vaultAbi,
     functionName: 'ship',
-    args: [router, strategy, [token0, token1], [SHIPPED_BALANCE, SHIPPED_BALANCE]],
+    args: [router, strategy, [token0, token1], [amount0, amount1]],
   })
   const receipt = await publicClient.waitForTransactionReceipt({ hash })
   if (receipt.status !== 'success') {
@@ -307,14 +339,15 @@ async function main() {
   })
   info('aqua balance0   ', balance0)
   info('aqua balance1   ', balance1)
-  if (balance0 !== SHIPPED_BALANCE || balance1 !== SHIPPED_BALANCE) {
+  if (balance0 !== amount0 || balance1 !== amount1) {
     throw new Error('Aqua stored a different balance than the one shipped')
   }
 
   deployments.strategy = {
     orderHash: routerHash,
     salt,
-    shippedBalance: SHIPPED_BALANCE.toString(),
+    shipped: { token0: amount0.toString(), token1: amount1.toString() },
+    reachableAtShip: reachable.toString(),
     haircutBps: HAIRCUT_BPS,
     maxUnwindPct: MAX_UNWIND_PCT,
     unitsPerLiquidityE18: UNITS_PER_LIQUIDITY_E18.toString(),
