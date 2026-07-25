@@ -371,6 +371,7 @@ async function main() {
   const request = {
     router,
     taker: account.address,
+    positionManager,
     tokenIn,
     tokenOut,
     amount: amount.toString(),
@@ -387,15 +388,15 @@ async function main() {
   writeFileSync(FILL_REQUEST_PATH, `${JSON.stringify(request, null, 2)}\n`)
   info('handover file   ', FILL_REQUEST_RELATIVE)
 
+  // The script asserts the two position manager calls with `vm.expectCall` before it broadcasts anything, so
+  // reaching the next line already means the claim held in simulation. The count below is read off the trace
+  // for the demo, not to decide anything.
   const dryRun = process.argv.includes('--dry')
   const trace = runFillScript({ broadcast: !dryRun })
   const positionManagerCalls = countPositionManagerCalls(trace, positionManager)
   info('simulated trace ', `${positionManagerCalls} modifyLiquidities calls to ${positionManager}`)
 
   if (dryRun) {
-    if (positionManagerCalls !== 2) {
-      throw new Error(`the simulation made ${positionManagerCalls} position manager calls, a fill must make two`)
-    }
     console.log('\nDry run only. The same command without --dry broadcasts it.\n')
     return
   }
@@ -514,12 +515,24 @@ function runFillScript(options: { broadcast: boolean }): string {
   return output
 }
 
-/** `0x429ba7...::dd46508f` in the simulated trace, once for the unwind and once for the redeposit. */
+/**
+ * Distinct `modifyLiquidities` payloads sent to the position manager, read off the simulated call trace.
+ *
+ * Two details make the naive grep wrong. Foundry prints the whole trace twice under `--broadcast`, once for
+ * the simulation and once for the run, so calls are counted by payload rather than by line. And the address of
+ * the position manager also appears inside the order data, because the instruction's arguments name it, so the
+ * match is anchored on the `::selector(` form rather than on the address appearing anywhere in the line.
+ */
 function countPositionManagerCalls(trace: string, positionManager: Address): number {
-  const needle = positionManager.toLowerCase()
-  return trace
-    .split('\n')
-    .filter((line) => line.toLowerCase().includes(needle) && line.toLowerCase().includes('dd46508f')).length
+  const call = new RegExp(
+    `(?:positionmanager|${positionManager.toLowerCase()})::(?:modifyliquidities|(?:0x)?dd46508f)\\((0x[0-9a-f]+)`,
+  )
+  const payloads = new Set<string>()
+  for (const line of trace.split('\n')) {
+    const payload = line.toLowerCase().match(call)?.[1]
+    if (payload) payloads.add(payload)
+  }
+  return payloads.size
 }
 
 /** The hash of the transaction the script just broadcast. */

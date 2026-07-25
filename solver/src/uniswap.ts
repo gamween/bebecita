@@ -218,10 +218,16 @@ export class UniswapClient {
    *
    * `liquidityPercentageToDecrease` is an integer in [1, 100]. A just-in-time withdrawal can therefore never
    * be exact: we round up and keep the surplus as float. That constraint is reported in FEEDBACK.md.
+   *
+   * Field type trap, and the reason `tokenId` is typed as it is here: `nftTokenId` must be sent as a JSON
+   * string. A JSON number is rejected with `cannot decode field
+   * uniswap.liquidity.v2.DecreasePositionRequest.nft_token_id from JSON: 37804`, which reads like a bad value
+   * rather than a bad type. `number` is deliberately not in the parameter type, so the shape that produces
+   * that error cannot be written by a caller, and `String()` below is what the wire needs.
    */
   async decrease(params: {
     walletAddress: string
-    tokenId: number | string
+    tokenId: string | bigint
     token0: string
     token1: string
     percent: number
@@ -246,10 +252,12 @@ export class UniswapClient {
    *
    * One side only: `independentToken` names the token and the amount, and the API computes the other leg from
    * live pool state. There is no two sided form of this request.
+   *
+   * `nftTokenId` is a JSON string here too, for the same reason as on `/lp/decrease`.
    */
   async increase(params: {
     walletAddress: string
-    tokenId: number | string
+    tokenId: string | bigint
     token0: string
     token1: string
     independentToken: string
@@ -273,9 +281,11 @@ export class UniswapClient {
    * Fees the same capital earned while it was quoting. Closing panel of the demo.
    *
    * The position is named by `tokenId` here and by `nftTokenId` on `/lp/increase` and `/lp/decrease`, in the
-   * same document, and this endpoint takes no token addresses at all.
+   * same document, and this endpoint takes no token addresses at all. Sending `nftTokenId` here fails with
+   * `ClaimFeesRequest validation error: "tokenId" is not allowed to be empty`, which names the field that is
+   * missing rather than the field that was sent, so it reads as an empty value and not as a wrong key.
    */
-  async claimFees(params: { walletAddress: string; tokenId: number | string }): Promise<any> {
+  async claimFees(params: { walletAddress: string; tokenId: string | bigint }): Promise<any> {
     return this.post(LP_HOST, '/lp/claim_fees', {
       walletAddress: params.walletAddress,
       chainId: this.config.chainId,

@@ -35,6 +35,7 @@ contract Fill is Script {
 
         address router = vm.parseJsonAddress(json, ".router");
         address taker = vm.parseJsonAddress(json, ".taker");
+        address positionManager = vm.parseJsonAddress(json, ".positionManager");
         uint256 amount = _uint(json, ".amount");
         uint256 amountOutMin = _uint(json, ".amountOutMin");
 
@@ -65,6 +66,12 @@ contract Fill is Script {
 
         uint256 deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
         require(vm.addr(deployerKey) == taker, "DEPLOYER_PRIVATE_KEY is not the taker named in the request");
+
+        // The claim of this project, asserted rather than read off a trace: both Uniswap payloads reach the
+        // position manager, once each, inside the one transaction that also settles the fill. A count of one
+        // is stricter than a presence check, and it fails the script before anything is broadcast.
+        vm.expectCall(positionManager, decreaseCalldata, 1);
+        vm.expectCall(positionManager, increaseCalldata, 1);
 
         vm.startBroadcast(deployerKey);
         (uint256 amountIn, uint256 amountOut, bytes32 orderHash) =
