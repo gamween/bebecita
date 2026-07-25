@@ -54,6 +54,10 @@ npm run snapshot                                         # starts with a clean, 
 | `solver/src/gate0.ts` | The six checks that decide whether the project exists. |
 | `solver/src/setup.ts` | `yarn setup`. Pool, position, vault redeploy, ERC721 custody. Resumable. |
 | `solver/src/aqua.ts` | `yarn aqua`. Builds the order, ships it from the vault, checks the hash. Its builders are exported for the fill path. |
+| `solver/src/strategy.ts` | Rebuilds the live order from what `yarn aqua` recorded and refuses to continue unless the hash matches. |
+| `solver/src/fill.ts` | `yarn fill`. Quote, sizing, the two LP calls, the broadcast, and the receipt check. |
+| `solver/src/reset.ts` | `yarn demo:reset`. Walks the salt space and re-ships, so the demo is replayable. |
+| `contracts/script/Fill.s.sol` | Where the taker traits are encoded, with `TakerTraitsLib.build`. Read the header comment before touching it. |
 
 ## Things that will bite you
 
@@ -84,6 +88,17 @@ silently changes the whole hook ordering.
 **Aqua reverts do not look like Aqua reverts.** When the maker is short, the failure surfaces as
 `ERC20InsufficientBalance` from the token, after the virtual balance was already decremented in memory. An
 `expectRevert` typed on an `IAqua` error will never match.
+
+**Taker traits reverts do not look like decoding reverts.** The 22 byte header is ten running sums over the
+slices behind it, so a header that is off by one byte does not fail to decode, it decodes a different slice.
+The VM then prices against garbage and the revert reads `TakerTraitsAmountOutMustBeGreaterThanZero`, which
+points at the amount. That is why the fill builds its traits in Solidity with `TakerTraitsLib.build` rather
+than reproducing the arithmetic in TypeScript.
+
+**The vault's first guard is a delta, not a level.** `preTransferOut` requires `outAfter >= outBefore +
+amountOut`, so float already sitting in the vault does not count towards it and the withdrawal alone has to
+release the whole payout. Sizing the unwind against the vault balance instead of against `amountOut` produces
+a fill that reverts only on the second run, once there is float.
 
 ## Environment
 

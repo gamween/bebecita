@@ -132,12 +132,42 @@ yarn test                     # 11 tests, no network needed
 forge script contracts/script/Deploy.s.sol --rpc-url sepolia --broadcast --verify
 yarn setup                    # pool, position, vault custody, all through the LP API
 yarn aqua                     # opens the strategy the book quotes
+yarn fill                     # one fill on Sepolia, end to end
 ```
 
 `yarn setup` is resumable and reads `deployments/sepolia.json` as its state: a position already recorded
 there is reused rather than duplicated, and `--recreate` opens a second one. `yarn aqua` picks a fresh salt
 on every run, because a strategy hash can be shipped exactly once and the second run would otherwise revert
 with `StrategiesMustBeImmutable`.
+
+## The fill
+
+```bash
+yarn fill                     # quote, size, unwind, swap, redeposit, one transaction
+yarn fill --amount=250        # a smaller clip
+yarn fill --dry               # simulate against live state and broadcast nothing
+yarn demo:reset               # re-salt the order and re-ship it, ready for a fresh fill
+```
+
+`yarn fill` reads the quote through `quote()` on a staticcall, which is what `asView()` exists for, sizes the
+withdrawal from the `amountOut` that came back, rounds the percentage up because
+`liquidityPercentageToDecrease` is an integer, fetches `/lp/decrease` and `/lp/increase`, and hands both
+payloads to `contracts/script/Fill.s.sol`. That script builds the taker traits with the sponsor's own
+`TakerTraitsLib.build`, asserts with `vm.expectCall` that each payload reaches the PositionManager exactly
+once, and broadcasts `swap()` from the taker. The receipt is then read back and the two `ModifyLiquidity`
+events are checked, so the claim is verified from the chain and not from the console.
+
+`yarn demo:reset` exists because a strategy hash can be shipped exactly once, ever. It walks the salt space
+for a program Aqua has never seen, ships that one from the vault with the same balances and the same risk
+parameters, and leaves the taker approved. Nothing else moves: same pool, same position, same vault, same
+router, one byte of difference in a no-op instruction.
+
+| First fill on Sepolia | [`0xe0a395b7…`](https://sepolia.etherscan.io/tx/0xe0a395b72e3ac659b226712a963b23c1173d2ccf3f9e95d84b028494a67bcc84) |
+|---|---|
+| Swapped | 1,000 bBRAVO in, 23.726273726273726275 bALPHA out |
+| Unwind | 1% of the position, released 999.99 bALPHA against 23.72 owed, surplus kept as float |
+| Redeposit | liquidity back from 99,000.00 to 99,956.74 in the same transaction |
+| Gas | 357,464 |
 
 ## Frontend
 
@@ -162,10 +192,8 @@ contracts/src/routers/        BebecitaRouter, the redeployed SwapVM pointing at 
 contracts/src/vault/          BebecitaVault, the maker: position custody, hooks, URC-3 reporting
 contracts/src/interfaces/     IHookStats (URC-3)
 contracts/test/               11 tests including the negative moment and the four guards
-contracts/script/             Sepolia deployment
+contracts/script/             Sepolia deployment, and the fill, where the taker traits are encoded
 solver/src/                   Uniswap LP API client, gate zero, setup, the Aqua strategy, fill orchestration
-
-solver/src/                   Uniswap LP API client, gate zero checker, fill orchestration
 app/                          landing page and dashboard, Vite plus React plus viem
 docs/                         architecture, onboarding, demo script, decisions
 ```
