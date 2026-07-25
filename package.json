@@ -26,6 +26,7 @@
     "aqua": "tsx solver/src/aqua.ts",
     "fill": "tsx solver/src/fill.ts",
     "rebalance": "tsx solver/src/rebalance.ts",
+    "inventory": "tsx solver/src/inventory.ts",
     "solver:serve": "tsx solver/src/server.ts",
     "demo:reset": "tsx solver/src/reset.ts"
   }
