@@ -20,6 +20,7 @@
   "scripts": {
     "build": "forge build --skip test",
     "test": "forge test",
-    "solver": "tsx solver/src/cli.ts"
+    "solver": "tsx solver/src/cli.ts",
+    "gate0": "tsx solver/src/gate0.ts"
   }
 }
