@@ -36,6 +36,27 @@ export const aquaAbi = parseAbi([
   'function rawBalances(address maker, address app, bytes32 strategyHash, address token) view returns (uint248 balance, uint8 tokensCount)',
 ])
 
+/**
+ * The events the dashboard reads back.
+ *
+ * `Shipped` is the vault's own, and its `strategyHash` is indexed, which is what makes the full list of
+ * strategies a single `eth_getLogs` rather than a walk of the salt space. `Swapped` is SwapVM's, with no
+ * indexed parameter at all, so it is filtered by address and decoded here.
+ */
+export const vaultEventsAbi = parseAbi([
+  'event Shipped(bytes32 indexed strategyHash, address indexed app)',
+  'event Unwound(bytes32 indexed orderHash, address indexed token, uint256 released, uint256 required)',
+  'event Redeposited(bytes32 indexed orderHash, uint256 liquidityBefore, uint256 liquidityAfter)',
+])
+
+export const routerEventsAbi = parseAbi([
+  'event Swapped(bytes32 orderHash, address maker, address taker, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut)',
+])
+
+export const poolManagerEventsAbi = parseAbi([
+  'event ModifyLiquidity(bytes32 indexed id, address indexed sender, int24 tickLower, int24 tickUpper, int256 liquidityDelta, bytes32 salt)',
+])
+
 /** `getPositionLiquidity(uint256)` is selector 0x1efeed33, the one the instruction and the vault both call. */
 export const positionManagerAbi = parseAbi([
   'function getPositionLiquidity(uint256 tokenId) view returns (uint128 liquidity)',

@@ -3,7 +3,7 @@ import { encodeAbiParameters, keccak256, type Address, type Hex } from 'viem'
 import { aquaAbi, erc20Abi, positionManagerAbi, routerAbi, stateViewAbi, vaultAbi } from './abi'
 import { publicClient } from './client'
 import { declaredTokenId, strategyHashes, type AppConfig } from './config'
-import { ok, reason, unavailable, type Result } from './format'
+import { ok, reason, short, unavailable, type Result } from './format'
 
 export interface PoolKey {
   currency0: Address
@@ -108,13 +108,26 @@ export function poolIdOf(key: PoolKey): Hex {
   )
 }
 
+/** The symbol and decimals of either demo token, by address, for labelling anything sorted as token0/token1. */
+export function tokenOf(snapshot: Snapshot, address: Address): { symbol: string; decimals: number } {
+  const meta = address.toLowerCase() === snapshot.tokenA.address.toLowerCase() ? snapshot.tokenA : snapshot.tokenB
+  return {
+    symbol: meta.symbol.ok ? meta.symbol.value : short(meta.address),
+    decimals: meta.decimals.ok ? meta.decimals.value : 18,
+  }
+}
+
 /**
  * Reads the whole dashboard.
  *
  * Everything here is a live call against Sepolia. A field that cannot be read carries the reason it could not
  * be read, because the position may legitimately not exist yet while the setup script is still running.
+ *
+ * `strategyHashes` are the ones found on chain, from the vault's `Shipped` events. They are merged with the one
+ * the deployment record names, because the record only ever names the live one and the metric this dashboard
+ * leads with is a sum over all of them.
  */
-export async function readSnapshot(config: AppConfig): Promise<Snapshot> {
+export async function readSnapshot(config: AppConfig, extraStrategyHashes: Hex[] = []): Promise<Snapshot> {
   const { deployment, chain } = config
   const vault = deployment.vault
   const router = deployment.router
@@ -254,7 +267,13 @@ export async function readSnapshot(config: AppConfig): Promise<Snapshot> {
       ? ok(deployment.aqua)
       : unavailable('no Aqua address on the vault or in the deployment record')
 
-  const hashes = strategyHashes(deployment)
+  const seen = new Set<string>()
+  const hashes = [...strategyHashes(deployment), ...extraStrategyHashes].filter((hash) => {
+    const key = hash.toLowerCase()
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
   const strategies: StrategyRow[] = []
   if (aquaAddress.ok && hashes.length) {
     const tokens: Array<{ address: Address; symbol: string }> = [
