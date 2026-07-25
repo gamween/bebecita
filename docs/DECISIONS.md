@@ -101,6 +101,37 @@ narrower position compiles its own real ticks and the book concentrates with it.
 The price did not move on this. Measured on the fill that shipped it, `915.372435469721101398` out against
 `915.372435390345788254` for the same balances on `0x50`, which is a relative difference of `8.7e-11`.
 
+## The rebalance is not inside the fill
+
+`yarn rebalance` sells the inventory the book accumulates back into the pool and puts both sides into the
+position. The obvious place to do that is the fill itself, in `postTransferIn`, where the vault already holds
+the taker's input and already executes calldata the Uniswap API built. It is deliberately not there, and there
+are two reasons rather than one.
+
+The settlement path is the one thing that must not grow new failure modes. Everything in this design that can
+revert already lives in those two hooks: four guards, a payload the taker supplied, and two PositionManager
+calls whose success is the fill's success. Adding a swap would add a router, a second pool interaction, a
+slippage bound and a deadline to that path, and each of them turns a market condition into a failed fill rather
+than into a failed maintenance job. A rebalance that fails at four in the morning costs a re-run. A fill that
+fails costs the demo, and worse, it costs it in front of somebody.
+
+And a maker that hedged into the same pool on every fill would be selling what it just bought at the pool price
+minus the pool fee, in the same transaction. That maker can never quote better than the pool it hedges into,
+because whatever spread it charges is handed straight back on the hedge, and a taker comparing the two would
+trade the pool directly. It is a router with extra steps and a worse price. Quoting a book means holding a
+position against the flow and choosing when to unwind it, which is a decision that belongs to the desk, between
+fills, at a size and a moment of its own choosing.
+
+There is a smaller third reason that is not load bearing but is real. Fifteen fills produced 23,947 bBRAVO of
+drift, and one rebalance cleared it in five transactions and one 0.3% pool fee. Hedging per fill would have
+paid that fee fifteen times, and the gas fifteen times, for a worse end state.
+
+Where it runs instead needed nothing new on chain. `BebecitaVault.sweep` is owner only and already existed, so
+the whole operation happens at the owner level: the vault is the book, the owner is the desk. Adding a
+rebalance entry point to the vault was considered and rejected on cost rather than on taste. `TOKEN_ID` is
+immutable, so a redeploy cascades into transferring the position NFT and re-shipping every strategy, which is a
+large price for an entry point that already exists in a more general form.
+
 ## Ruled out on purpose
 
 The instruction as a wrapper with a nested `runLoop`. Four hours on the only component of the critical path,

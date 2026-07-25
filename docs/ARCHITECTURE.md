@@ -130,6 +130,72 @@ Four guards:
 
 A taker therefore chooses how to unwind and never whether the maker ends up short.
 
+## Inventory
+
+A fill moves both tokens and it does not move them symmetrically.
+
+`/lp/decrease` returns both sides of the position pro rata, because that is what removing liquidity from a v4
+position does. The fill then pays the taker in one token only and is paid by the taker in the other. So a fill
+in one direction leaves the vault holding more of the token the taker paid with, less of the token the taker
+was paid in, and a position smaller by whatever the unwind removed. The redeposit that follows is two sided,
+and a two sided deposit is capped by whichever token is scarce, which is the one the maker keeps selling. It
+can put back a fraction of what came out and no more.
+
+The numbers, all read off receipts by `yarn inventory` rather than modelled. Fifteen fills in one direction
+removed 14,694 units of liquidity from the position and put 5,857 back, which is 39.85%, and the shape behind
+that average is the part worth reading. The first five fills restored 96 to 98%, because the book was quoting
+almost nothing out and the unwind's own output came straight back into the position. Once the book quoted near
+parity, the restore rate fell to between 5% and 15% and stayed there. Over the same fifteen fills the vault
+accumulated 23,947 bBRAVO of free float and the position fell from 100,000 of liquidity to 92,140.
+
+That is not a defect being reported. It is the definition of a market maker seeing one sided flow: it is buying
+what the market is selling, and inventory is what buying looks like while nobody is buying back. Every market
+maker that has ever existed has had this problem and the answer has always been the same, which is to trade the
+inventory home and to charge a spread wide enough to pay for that trade. The round trip through this book is
+not balance neutral without that step, and the spread the maker earns has to cover the eventual cost of the
+trade home rather than only the gas of the fill.
+
+`yarn rebalance` is that step. It reads the vault's float on both tokens and the position's liquidity, sizes
+the sale that leaves the remaining float and the sale's proceeds in the pool's own post trade ratio, sweeps
+only that leg out to the owner, sells it through `POST /quote` and `POST /swap` on the trade host, sends the
+proceeds back, and tops the position up through `/lp/increase` executed by the vault. The target is stated
+rather than implied: the position back toward the liquidity it opened with, and the float back to near zero,
+which is the state this whole project claims. Measured on Sepolia, one run took the float from 21,859.61
+bBRAVO and 2.07 bALPHA to 35.73 and 0.93, and the position from 92,140.39 of liquidity to 102,473.62, which is
+102.47% of what it opened with.
+
+It runs between fills and never inside one. Nothing about the fill changed to make this possible: `sweep` is
+owner only and already existed, so the vault is the book and the owner is the desk, which is also how a real
+trading desk is arranged. `docs/DECISIONS.md` records why putting it in the settlement path would be wrong
+twice over.
+
+Two honest details about what a rebalance costs, because they are the interesting part rather than a footnote.
+
+The only market for these two tokens is the pool this project created, and the only liquidity provider in it is
+the vault. So the rebalance trades against the maker's own position: the 0.3% fee comes back and the price
+impact lands on the book it came from. What that means is that in a closed system a maker cannot trade its
+inventory home at all, it can only move the imbalance from its float into the price of its own pool. In a real
+market the surplus is sold to somebody else and the same price impact is a cost paid outward. It is the same
+operation either way, and this is why the spread has to cover it.
+
+And the price does move, for the first time in this project's life. A decrease and an increase are both pro
+rata, so fourteen fills left the pool at exactly `sqrtPriceX96 = 2^96`, tick 0, parity, which is the state
+`yarn setup` created it in. The rebalance is the first operation here that moves it, and it has to be: the
+inventory imbalance is real, and in a closed system the price is where a real imbalance shows up. After the run
+above the pool sits at tick -2126, 0.8085 bALPHA per bBRAVO.
+
+That has one consequence the maker has to be told about, and `yarn rebalance` prints it. A unit of full range
+liquidity is worth `sqrt(price)` of token1 and `1/sqrt(price)` of token0, so `unitsPerLiquidityE18`, the maker's
+conversion factor compiled into the `0x92` arguments, is exactly 1 only while the pool sits at parity. After
+the rebalance it measures 0.899173157285162373 bALPHA per unit, so the instruction clamps `balanceOut` against
+11.21% more bALPHA than the position can release, and `reachableFromPosition()` reports the same overstatement
+because it reads the same number. The clamp and the URC-3 report stay consistent with each other and both drift
+from the position together. The measured effect on a fill is smaller than the drift, because `yarn fill` sizes
+the unwind as `amountOut / liquidity` and both terms carry the same factor: the safety margin between what a
+1% unwind releases and what the fill owes fell from 16.6% to 4.8%, and the fill still sizes and settles. The
+fix, when a maker wants that margin back, is to re-ship the book with the measured factor and to set the same
+number on the vault with `setRiskParams`, which is one command each and neither is on the fill path.
+
 ## URC-3
 
 The vault implements `IHookStats` from URC-3, published by Uniswap Labs on 2026-06-11. The standard's
