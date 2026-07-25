@@ -27,7 +27,38 @@ export interface TransactionRequest {
   data: string
   value?: string
   from?: string
+  chainId?: number
   gasLimit?: string
+}
+
+/** `/lp/check_approval` wraps every transaction it returns, permits included, in this envelope. */
+export interface ApprovalTransaction {
+  transaction: TransactionRequest
+  cancelApproval?: boolean
+  action?: string
+}
+
+export interface CheckApprovalResponse {
+  requestId: string
+  transactions: ApprovalTransaction[]
+  kycRequiredWarnings?: unknown[]
+}
+
+export interface LpToken {
+  tokenAddress: string
+  amount: string
+}
+
+export interface CreatePositionResponse {
+  requestId: string
+  token0: LpToken
+  token1: LpToken
+  tickLower: number
+  tickUpper: number
+  adjustedMinPrice: string
+  adjustedMaxPrice: string
+  create: TransactionRequest
+  gasFee?: string
 }
 
 /** Thrown with the body attached, because the gateway explains itself in the payload rather than the status. */
@@ -99,6 +130,14 @@ export class UniswapClient {
    * `generatePermitAsTransaction: true` is the flag that makes this project possible at all. The spec describes
    * it as "permits are returned as on-chain transactions rather than off-chain signatures", which is what lets
    * a contract own the position: the vault cannot sign EIP-712, it can only execute.
+   *
+   * The list comes back ordered and must be executed in order: per token, an ERC20 `approve` to Permit2, then a
+   * Permit2 `approve` to the v4 PositionManager. The second call is the one that actually funds a deposit, and
+   * it is invisible to anyone who only reads the ERC20 allowance.
+   *
+   * Field name trap: `lpTokens` entries are `{ tokenAddress, amount }`. Sending `{ address, amount }` is
+   * rejected with `"lpTokens[0].tokenAddress" is not allowed to be empty`, which reads like a missing value
+   * rather than a wrong key.
    */
   async checkApproval(params: {
     walletAddress: string
@@ -106,20 +145,19 @@ export class UniswapClient {
     token1: string
     amount0: string
     amount1: string
-    tokenId?: number
-  }): Promise<any> {
+    action?: 'CREATE' | 'INCREASE' | 'DECREASE' | 'MIGRATE'
+  }): Promise<CheckApprovalResponse> {
     return this.post(LP_HOST, '/lp/check_approval', {
       walletAddress: params.walletAddress,
       chainId: this.config.chainId,
       protocol: this.config.protocol,
-      action: 'INCREASE',
+      action: params.action ?? 'CREATE',
       generatePermitAsTransaction: true,
       simulateTransaction: false,
       lpTokens: [
-        { address: params.token0, amount: params.amount0 },
-        { address: params.token1, amount: params.amount1 },
+        { tokenAddress: params.token0, amount: params.amount0 },
+        { tokenAddress: params.token1, amount: params.amount1 },
       ],
-      ...(params.tokenId !== undefined ? { v3NftTokenId: params.tokenId } : {}),
     })
   }
 
@@ -129,6 +167,17 @@ export class UniswapClient {
    * `newPool` is what removes every dependency on pre-existing testnet liquidity: we deploy both ERC20s, mint
    * them to ourselves, and have the API create the pool and the position in one call. The demo therefore owns
    * its own pool, which is what makes it deterministic and replayable.
+   *
+   * `newPool` takes `token0Address` and `token1Address`, like `existingPool`, and `initialPrice` is a
+   * `sqrtRatioX96` string. Sending `token0`/`token1` fails the whole request with `"pool" does not match any of
+   * the allowed types`, which names the union and not the offending key.
+   *
+   * The amount side is one object, `independentToken: { tokenAddress, amount }`. There is no separate
+   * `independentAmount`, and there is no `TOKEN_0` enum: the token is named by address, and sending a string
+   * there fails with `cannot decode message uniswap.liquidity.v2.CreateToken from JSON`.
+   *
+   * What comes back is a `multicall(bytes[])` on the PositionManager, `[initializePool, modifyLiquidities]`,
+   * with the position minted to `walletAddress`.
    */
   async createPosition(params: {
     walletAddress: string
@@ -138,26 +187,27 @@ export class UniswapClient {
     tickSpacing: number
     tickLower: number
     tickUpper: number
-    independentToken: 'TOKEN_0' | 'TOKEN_1'
+    independentToken: string
     independentAmount: string
-    initialPrice?: string
-  }): Promise<any> {
+    initialPrice: string
+    hooks?: string
+    slippageTolerance?: number
+  }): Promise<CreatePositionResponse> {
     return this.post(LP_HOST, '/lp/create', {
       walletAddress: params.walletAddress,
       chainId: this.config.chainId,
       protocol: this.config.protocol,
       newPool: {
-        token0: params.token0,
-        token1: params.token1,
+        token0Address: params.token0,
+        token1Address: params.token1,
         fee: params.fee,
         tickSpacing: params.tickSpacing,
-        hooks: '0x0000000000000000000000000000000000000000',
-        ...(params.initialPrice ? { initialPrice: params.initialPrice } : {}),
+        hooks: params.hooks ?? '0x0000000000000000000000000000000000000000',
+        initialPrice: params.initialPrice,
       },
       tickBounds: { tickLower: params.tickLower, tickUpper: params.tickUpper },
-      independentToken: params.independentToken,
-      independentAmount: params.independentAmount,
-      slippageTolerance: 5,
+      independentToken: { tokenAddress: params.independentToken, amount: params.independentAmount },
+      slippageTolerance: params.slippageTolerance ?? 0.5,
       simulateTransaction: false,
     })
   }
@@ -171,56 +221,66 @@ export class UniswapClient {
    */
   async decrease(params: {
     walletAddress: string
-    tokenId: number
+    tokenId: number | string
     token0: string
     token1: string
     percent: number
+    slippageTolerance?: number
   }): Promise<{ decrease: TransactionRequest; [k: string]: unknown }> {
     const percent = Math.min(100, Math.max(1, Math.ceil(params.percent)))
     return this.post(LP_HOST, '/lp/decrease', {
       walletAddress: params.walletAddress,
       chainId: this.config.chainId,
       protocol: this.config.protocol,
-      nftTokenId: params.tokenId,
+      nftTokenId: String(params.tokenId),
       token0Address: params.token0,
       token1Address: params.token1,
       liquidityPercentageToDecrease: percent,
-      slippageTolerance: 5,
+      slippageTolerance: params.slippageTolerance ?? 0.5,
       simulateTransaction: false,
-      withdrawAsWeth: false,
     })
   }
 
-  /** The refund. Its calldata goes into the `postTransferInHookData` slice. */
+  /**
+   * The refund. Its calldata goes into the `postTransferInHookData` slice.
+   *
+   * One side only: `independentToken` names the token and the amount, and the API computes the other leg from
+   * live pool state. There is no two sided form of this request.
+   */
   async increase(params: {
     walletAddress: string
-    tokenId: number
+    tokenId: number | string
     token0: string
     token1: string
-    amount0: string
-    amount1: string
+    independentToken: string
+    independentAmount: string
+    slippageTolerance?: number
   }): Promise<{ increase: TransactionRequest; [k: string]: unknown }> {
     return this.post(LP_HOST, '/lp/increase', {
       walletAddress: params.walletAddress,
       chainId: this.config.chainId,
       protocol: this.config.protocol,
-      nftTokenId: params.tokenId,
-      token0: { address: params.token0, amount: params.amount0 },
-      token1: { address: params.token1, amount: params.amount1 },
-      slippageTolerance: 5,
+      nftTokenId: String(params.tokenId),
+      token0Address: params.token0,
+      token1Address: params.token1,
+      independentToken: { tokenAddress: params.independentToken, amount: params.independentAmount },
+      slippageTolerance: params.slippageTolerance ?? 0.5,
       simulateTransaction: false,
     })
   }
 
-  /** Fees the same capital earned while it was quoting. Closing panel of the demo. */
-  async claimFees(params: { walletAddress: string; tokenId: number; token0: string; token1: string }): Promise<any> {
+  /**
+   * Fees the same capital earned while it was quoting. Closing panel of the demo.
+   *
+   * The position is named by `tokenId` here and by `nftTokenId` on `/lp/increase` and `/lp/decrease`, in the
+   * same document, and this endpoint takes no token addresses at all.
+   */
+  async claimFees(params: { walletAddress: string; tokenId: number | string }): Promise<any> {
     return this.post(LP_HOST, '/lp/claim_fees', {
       walletAddress: params.walletAddress,
       chainId: this.config.chainId,
       protocol: this.config.protocol,
-      nftTokenId: params.tokenId,
-      token0Address: params.token0,
-      token1Address: params.token1,
+      tokenId: String(params.tokenId),
       simulateTransaction: false,
     })
   }
