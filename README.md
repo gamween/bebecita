@@ -13,9 +13,21 @@
 | Contract | Address |
 |---|---|
 | BebecitaRouter, our modified SwapVM | [`0x354422f6e4e3476b540E306A6DdFb4638d9EA5c3`](https://sepolia.etherscan.io/address/0x354422f6e4e3476b540E306A6DdFb4638d9EA5c3) |
-| BebecitaVault, the maker | [`0x3629819Ad2d0e34BA90cA6b206a8bBd36C609036`](https://sepolia.etherscan.io/address/0x3629819Ad2d0e34BA90cA6b206a8bBd36C609036) |
+| BebecitaVault, the maker | [`0xE703F509ba1bF70BcFa4957a7090e73B627dE76a`](https://sepolia.etherscan.io/address/0xE703F509ba1bF70BcFa4957a7090e73B627dE76a) |
 | bALPHA | [`0xdB41CB0A2EEFF8Ed53Ef019D4C9826744f500B7F`](https://sepolia.etherscan.io/address/0xdB41CB0A2EEFF8Ed53Ef019D4C9826744f500B7F) |
 | bBRAVO | [`0x0128Ac6B5E3364b022e55A0cf9c0cb4987B3B20f`](https://sepolia.etherscan.io/address/0x0128Ac6B5E3364b022e55A0cf9c0cb4987B3B20f) |
+
+The maker's inventory, opened through the Uniswap API and owned by the vault:
+
+| | |
+|---|---|
+| Position | v4 NFT [`#37804`](https://sepolia.etherscan.io/token/0x429ba70129df741B2Ca2a85BC3A2a3328e5c09b4?a=37804), full range, 100,000 of each token |
+| Pool | `0x25f7dd131e5548b22a4bf9b95587514d69960261c1defff0ec465f9f90d54489`, fee 3000, spacing 60, no hook |
+| Reachable per fill | 23,750 tokens, which is 25% of the position after a 5% haircut |
+| Aqua strategy | `0x386716d5e39927fc3f8a1ddd45a9c09a6d96a059b52de2dbfcff8dcfd6e58d8d` |
+
+The vault was redeployed once the position existed, because `TOKEN_ID` is immutable and the first deployment
+predated the pool. That is the whole reason the address above differs from the one in the deploy transaction.
 
 The router's `AQUA()` getter returns `0x499943E74FB0cE105688beeE8Ef2ABec5D936d31`, the canonical Aqua address, which is the one line that
 proves the official contracts are the ones doing the work. Its `OPCODE_UNWIND_PRICED_BALANCE_OUT()` returns
@@ -100,8 +112,8 @@ The API is the funding mechanism, not a data source. Qualifying function claimed
 | Endpoint | Called from | Role |
 |---|---|---|
 | `POST /lp/pool_info` | `solver/src/uniswap.ts` | Pool state and tick, sizes the clip and mirrors the position range into the Aqua program |
-| `POST /lp/check_approval` | `solver/src/uniswap.ts` | With `generatePermitAsTransaction: true`, returns permits as executable transactions instead of EIP-712 typed data. This is what makes a contract owned position possible: the vault cannot sign, only execute |
-| `POST /lp/create` | `solver/src/uniswap.ts` | Opens the pool and the position through `newPool`, so the demo owns its own pool and depends on no pre-existing testnet liquidity |
+| `POST /lp/check_approval` | `solver/src/setup.ts` | With `generatePermitAsTransaction: true`, returns permits as executable transactions instead of EIP-712 typed data. This is what makes a contract owned position possible: the vault cannot sign, only execute |
+| `POST /lp/create` | `solver/src/setup.ts` | Opens the pool and the position through `newPool`, so the demo owns its own pool and depends on no pre-existing testnet liquidity |
 | `POST /lp/decrease` | `solver/src/uniswap.ts` | **Once per fill.** Its calldata goes verbatim into the `preTransferOutHookData` slice of `TakerTraits` and is executed by `BebecitaVault.preTransferOut` |
 | `POST /lp/increase` | `solver/src/uniswap.ts` | Same fill. Its calldata goes into `postTransferInHookData` and is executed by `BebecitaVault.postTransferIn` |
 | `POST /lp/claim_fees` | `solver/src/uniswap.ts` | Closing panel: the fees the same capital earned while it was quoting |
@@ -115,10 +127,17 @@ See [FEEDBACK.md](FEEDBACK.md) for what we found while integrating.
 ```bash
 yarn install
 cp .env.example .env          # fill UNISWAP_API_KEY and DEPLOYER_PRIVATE_KEY
-yarn gate0                    # five checks that decide whether the project exists
+yarn gate0                    # six checks that decide whether the project exists
 yarn test                     # 11 tests, no network needed
 forge script contracts/script/Deploy.s.sol --rpc-url sepolia --broadcast --verify
+yarn setup                    # pool, position, vault custody, all through the LP API
+yarn aqua                     # opens the strategy the book quotes
 ```
+
+`yarn setup` is resumable and reads `deployments/sepolia.json` as its state: a position already recorded
+there is reused rather than duplicated, and `--recreate` opens a second one. `yarn aqua` picks a fresh salt
+on every run, because a strategy hash can be shipped exactly once and the second run would otherwise revert
+with `StrategiesMustBeImmutable`.
 
 Iteration discipline, measured on the build machine: a full `forge build` costs **3 min 49** because of `via_ir`, `forge build --skip test` costs **17 s**, and `forge test --match-path <one file>` costs **13 s**. Never run the bare commands.
 
@@ -132,7 +151,7 @@ contracts/src/vault/          BebecitaVault, the maker: position custody, hooks,
 contracts/src/interfaces/     IHookStats (URC-3)
 contracts/test/               11 tests including the negative moment and the four guards
 contracts/script/             Sepolia deployment
-solver/src/                   Uniswap LP API client, gate zero checker, fill orchestration
+solver/src/                   Uniswap LP API client, gate zero, setup, the Aqua strategy, fill orchestration
 docs/                         architecture, onboarding, demo script, decisions
 ```
 

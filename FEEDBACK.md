@@ -59,9 +59,54 @@ and it is not stated anywhere near the top of the docs.
 Suggestion: one line in the LP overview saying the LP endpoints read the live chain and do not work against
 private forks, with a pointer to the supported testnets.
 
+### 6. Four request field names in the LP API are inconsistent, and the validation errors name the wrong thing
+
+Building the create flow cost four round trips, each spent on a key name rather than on anything semantic.
+
+| Sent | Expected | What the 400 said |
+|---|---|---|
+| `lpTokens: [{ address, amount }]` | `{ tokenAddress, amount }` | `"lpTokens[0].tokenAddress" is not allowed to be empty` |
+| `newPool: { token0, token1, ... }` | `token0Address`, `token1Address` | `"pool" does not match any of the allowed types` |
+| `independentToken: "TOKEN_0"` plus `independentAmount` | `independentToken: { tokenAddress, amount }` | `cannot decode message uniswap.liquidity.v2.CreateToken from JSON: "TOKEN_0"` |
+| `claim_fees` with `nftTokenId` | `tokenId`, though `/lp/increase` and `/lp/decrease` both say `nftTokenId` | `ClaimFeesRequest validation error: "tokenId" is not allowed to be empty` |
+
+Impact: the first message reads as a missing value, not a wrong key. The second names the union rather than the
+offending member. The third leaks an internal protobuf message type, and a reader who trusts it goes looking for
+a `CreateToken` enum that does not exist in any published schema.
+
+Suggestion: report unknown keys by name, and settle on one spelling of the position identifier across the seven
+LP paths.
+
+### 7. `/lp/create` accepts a contract as `walletAddress` and returns a transaction most contracts cannot execute
+
+We asked for a position owned by a contract, which is the whole shape of this project. The API accepted the
+contract address without complaint and returned the same payload with the vault as recipient and `from`.
+
+That payload is a `multicall(bytes[])` on the v4 PositionManager wrapping `initializePool` and
+`modifyLiquidities`. A contract that forwards a fixed selector, which is what a vault holding other people's
+collateral should be, cannot execute it. The workable shapes are to split the multicall by hand, or to mint to
+an EOA and transfer the ERC721 afterwards. We did the second, because the first also requires deploying the
+owner against a tokenId read from `nextTokenId()` before the mint, which races every other position minted
+meanwhile.
+
+Suggestion: a `recipient` field distinct from the payer, or a documented note that a contract `walletAddress`
+must be able to execute `multicall`. Either would make contract owned positions a first class flow.
+
+### 8. The Permit2 half of `check_approval` is the half that matters, and it is the easy one to miss
+
+For a v4 pair with `generatePermitAsTransaction: true`, `/lp/check_approval` returns four transactions: an ERC20
+`approve` to Permit2 per token, then a Permit2 `approve(token, positionManager, amount, expiration)` per token.
+Only the second pair actually lets the PositionManager pull anything, and it is invisible to anyone who checks
+`IERC20.allowance` and concludes the wallet is ready.
+
+For a contract owner this is the concrete consequence of finding 3: the contract needs an entry point for the
+Permit2 call specifically, since Permit2's `approve` is not an ERC20 `approve`. Ours is `approveViaPermit2`.
+
+Suggestion: say in the LP guide that v4 approvals are two legged, and that the second leg is the funding one.
+
 ## 1inch
 
-### 6. The custom SwapVM example in `1inch/sdks` no longer compiles against `swap-vm@main`
+### 9. The custom SwapVM example in `1inch/sdks` no longer compiles against `swap-vm@main`
 
 `contracts/src/swap-vm/TestCustomSwapVM.sol` uses `_instructions()`, `_opcodes()` and `_notInstruction` with
 a static function pointer array. `swap-vm` moved to direct dispatch via `_runOpcode(Context, uint256, bytes)`
@@ -72,7 +117,7 @@ rather than at the change.
 
 Suggestion: update the sample, or copy the shape of `AquaOpcodesDebug.sol`, which is the pattern that works.
 
-### 7. Three `Controls` instructions are unreachable from the Aqua opcode table
+### 10. Three `Controls` instructions are unreachable from the Aqua opcode table
 
 `Stop` (0x00), `Revert` (0x01) and `JumpIfDirection` (0x30) exist in `Controls.sol`, are dispatched by the
 full `Opcodes` table, and are absent from `AquaOpcodes`. An Aqua program using any of them reverts with
@@ -84,7 +129,7 @@ Reproduce: build a program containing opcode `0x00` and run it through `AquaSwap
 
 Suggestion: three `else if` branches in `AquaOpcodes._runOpcode`. Our `BebecitaOpcodes` carries them.
 
-### 8. The canonical instruction ordering makes protocol fees unusable for a capital efficient maker
+### 11. The canonical instruction ordering makes protocol fees unusable for a capital efficient maker
 
 The SwapVM whitepaper gives the canonical ordering as `aquaProtocolFee`, then the swap instruction, then
 `flatFee`. But `_aquaProtocolFeeAmountInXD` pulls `tokenIn` from the maker during `runLoop`, before the taker
@@ -96,7 +141,7 @@ efficient, therefore cannot pay a protocol fee at all. The only usable fee instr
 
 Suggestion: a protocol fee variant that settles after `_transferIn`, or that draws on `amountNetPulled`.
 
-### 9. No testnet deployment is documented, although one exists
+### 12. No testnet deployment is documented, although one exists
 
 The Aqua README lists 13 mainnet deployments and no testnet. The official Aqua is in fact deployed on
 Ethereum Sepolia at `0x499943E74FB0cE105688beeE8Ef2ABec5D936d31`, the canonical address, with bytecode
