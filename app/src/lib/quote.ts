@@ -2,7 +2,7 @@ import { concatHex, numberToHex, type Address, type Hex } from 'viem'
 
 import { routerAbi } from './abi'
 import { publicClient } from './client'
-import type { DeploymentRecord } from './config'
+import { orderRecord, type DeploymentRecord } from './config'
 import { ok, unavailable, type Result } from './format'
 
 /**
@@ -29,7 +29,7 @@ export interface Order {
 
 /** The order the book quotes on. It is published by the setup script, not reconstructed here. */
 export function orderFrom(deployment: DeploymentRecord): Result<Order> {
-  const order = deployment.order
+  const order = orderRecord(deployment)
   if (!order) {
     return unavailable(
       'no order in deployments/sepolia.json yet. The setup script writes it when it ships the strategy, and quote() cannot be called without the exact bytes.',

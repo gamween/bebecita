@@ -6,23 +6,72 @@ import type { Address, Hex } from 'viem'
  * dev server. Both are fetched at runtime, so a redeploy or a freshly created position shows up on a refresh.
  */
 
+export interface OrderRecord {
+  maker: Address
+  traits: string | number
+  data: Hex
+}
+
+/** What `yarn aqua` and `yarn demo:reset` write, and what `yarn fill` reads back. */
+export interface StrategyRecord {
+  orderHash?: Hex
+  salt?: Hex
+  shipped?: { token0?: string; token1?: string }
+  reachableAtShip?: string
+  haircutBps?: number
+  maxUnwindPct?: number
+  unitsPerLiquidityE18?: string
+  order?: OrderRecord
+  shipTx?: Hex
+}
+
+/** The receipt of the last fill, as the fill script recorded it after reading it back from the chain. */
+export interface FillRecord {
+  txHash?: Hex
+  orderHash?: Hex
+  amountIn?: string
+  amountOut?: string
+  tokenIn?: Address
+  tokenOut?: Address
+  unwindPercent?: number
+  gasUsed?: string
+  blockNumber?: string
+}
+
 export interface DeploymentRecord {
   chainId?: number
   aqua?: Address
   positionManager?: Address
+  poolManager?: Address
   router?: Address
   vault?: Address
   tokenA?: Address
   tokenB?: Address
   deployer?: Address
 
-  /** Written once the Uniswap position exists. Absent while the position is still being created. */
+  pool?: {
+    currency0?: Address
+    currency1?: Address
+    fee?: number
+    tickSpacing?: number
+    hooks?: Address
+    poolId?: Hex
+    tickLower?: number
+    tickUpper?: number
+  }
+  /** Written by `yarn setup` once the Uniswap position exists. */
+  position?: { tokenId?: string | number; liquidity?: string; owner?: Address }
+  strategy?: StrategyRecord
+  lastFill?: FillRecord
+
+  /**
+   * Flat forms of the three fields above. The setup scripts nest them, older records and hand written ones do
+   * not, and reading both costs three lines where guessing wrong costs a dead button.
+   */
   tokenId?: string | number
-  /** The Aqua strategy the book quotes on. Either field may be present. */
   strategyHash?: Hex
   strategyHashes?: Hex[]
-  /** The SwapVM order as shipped. `quote()` cannot be called without it. */
-  order?: { maker: Address; traits: string | number; data: Hex }
+  order?: OrderRecord
   /** A taker traits blob published by the solver, used verbatim when present. */
   takerTraitsAndData?: Hex
 }
@@ -71,20 +120,37 @@ export async function loadConfig(): Promise<AppConfig> {
   return { deployment, chain, problems, loadedAt: Date.now() }
 }
 
-/** Every strategy hash the record carries, in the order it declares them. */
+/**
+ * Every strategy hash the record carries, most recent first.
+ *
+ * The record only ever names the live one, because `yarn demo:reset` overwrites it. The dashboard finds the
+ * others on chain, from the vault's own `Shipped` events, and this is the seed that guarantees the current one
+ * is listed even when the log scan cannot reach back far enough.
+ */
 export function strategyHashes(deployment: DeploymentRecord): Hex[] {
-  const hashes = [...(deployment.strategyHashes ?? [])]
-  if (deployment.strategyHash && !hashes.includes(deployment.strategyHash)) hashes.unshift(deployment.strategyHash)
+  const hashes: Hex[] = []
+  const add = (hash: Hex | undefined) => {
+    if (hash && !hashes.some((known) => known.toLowerCase() === hash.toLowerCase())) hashes.push(hash)
+  }
+  add(deployment.strategy?.orderHash)
+  add(deployment.strategyHash)
+  for (const hash of deployment.strategyHashes ?? []) add(hash)
   return hashes
 }
 
 /** The tokenId written by the setup script, if any. The vault's own immutable is preferred over this. */
 export function declaredTokenId(deployment: DeploymentRecord): bigint | null {
-  if (deployment.tokenId === undefined || deployment.tokenId === null || deployment.tokenId === '') return null
+  const declared = deployment.position?.tokenId ?? deployment.tokenId
+  if (declared === undefined || declared === null || declared === '') return null
   try {
-    const value = BigInt(deployment.tokenId)
+    const value = BigInt(declared)
     return value > 0n ? value : null
   } catch {
     return null
   }
+}
+
+/** The order the book quotes on, nested under `strategy` by `yarn aqua` and flat in older records. */
+export function orderRecord(deployment: DeploymentRecord): OrderRecord | null {
+  return deployment.order ?? deployment.strategy?.order ?? null
 }

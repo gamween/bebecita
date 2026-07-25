@@ -19,6 +19,8 @@ const CHAIN_ROUTE = '/deployments/chain.json'
 
 const LP_HOST = 'https://liquidity.api.uniswap.org'
 const PUBLIC_SEPOLIA_RPC = 'https://ethereum-sepolia-rpc.publicnode.com'
+/** Where `yarn solver:serve` listens. Overridden by `SOLVER_URL` in the repository .env. */
+const SOLVER_HOST = 'http://127.0.0.1:8787'
 
 /**
  * The fixed Sepolia addresses live in `solver/src/config.ts`, which cannot be imported from a browser bundle
@@ -114,10 +116,24 @@ export default defineConfig(({ mode }) => {
     rewrite: () => '',
   }
 
-  const proxy = { '/api/uniswap': uniswapProxy, '/api/rpc': rpcProxy }
+  /**
+   * The fill orchestrator, which signs with the key that owns the vault and therefore cannot live in the tab.
+   * Proxying it keeps the app same origin, so the default needs no CORS and no configuration: start
+   * `yarn solver:serve` and the button works. `VITE_SOLVER_URL` bypasses this entirely when set.
+   */
+  const solverProxy = {
+    target: env.SOLVER_URL || SOLVER_HOST,
+    changeOrigin: true,
+    rewrite: (path: string) => path.replace(/^\/api\/solver/, ''),
+  }
+
+  const proxy = { '/api/uniswap': uniswapProxy, '/api/rpc': rpcProxy, '/api/solver': solverProxy }
 
   return {
     plugins: [react(), addressFiles()],
+    // One .env for the whole repository. Only VITE_ prefixed variables reach the bundle, which is why the
+    // Uniswap key and the deployer key can sit in the same file as VITE_SOLVER_URL without leaking.
+    envDir: repoRoot,
     server: { port: 5173, proxy },
     preview: { port: 4173, proxy },
     build: { target: 'es2022', sourcemap: true },
