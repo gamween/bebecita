@@ -23,6 +23,8 @@
     "solver": "tsx solver/src/cli.ts",
     "gate0": "tsx solver/src/gate0.ts",
     "setup": "tsx solver/src/setup.ts",
-    "aqua": "tsx solver/src/aqua.ts"
+    "aqua": "tsx solver/src/aqua.ts",
+    "fill": "tsx solver/src/fill.ts",
+    "demo:reset": "tsx solver/src/reset.ts"
   }
 }
