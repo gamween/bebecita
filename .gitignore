@@ -1,4 +1,5 @@
 node_modules/
+node_modules
 out/
 cache/
 broadcast/
@@ -8,3 +9,5 @@ broadcast/
 .DS_Store
 solver/dist/
 deployments/*.local.json
+
+app/node_modules

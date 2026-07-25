@@ -331,7 +331,15 @@ pure` Solidity, and porting it removed the process.
 The port is not asserted, it is proved: `contracts/test/TakerTraits.t.sol` builds twelve argument shapes with
 the sponsor's own library and asserts byte equality against what `solver/src/takerTraits.ts` wrote for the
 same arguments, then round trips the live fill shape back through the library's own slice readers.
-`contracts/script/Fill.s.sol` stays in the repository as the Solidity reference that diff is taken against.
+`contracts/script/Fill.s.sol` stays in the repository as the Solidity reference that diff is taken against,
+and it makes the same assertion a second time on payloads nobody chose: every `yarn fill` writes its request
+to `deployments/fill.local.json`, and replaying it through the script checks the TypeScript blob against
+`TakerTraitsLib.build` on the 676 and 708 bytes of v4 Actions the Uniswap API built for that fill.
+
+```
+forge script contracts/script/Fill.s.sol --rpc-url sepolia --skip test
+  taker traits      TypeScript port matches TakerTraitsLib.build byte for byte
+```
 
 The dashboard leads with **SLAC**, the Shared Liquidity Amplification Coefficient of the Aqua whitepaper,
 page 4: the total liquidity provisioned across every strategy this vault has shipped, over the wallet equity
