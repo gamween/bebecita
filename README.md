@@ -23,8 +23,9 @@ The maker's inventory, opened through the Uniswap API and owned by the vault:
 |---|---|
 | Position | v4 NFT [`#37804`](https://sepolia.etherscan.io/token/0x429ba70129df741B2Ca2a85BC3A2a3328e5c09b4?a=37804), full range, 100,000 of each token |
 | Pool | `0x25f7dd131e5548b22a4bf9b95587514d69960261c1defff0ec465f9f90d54489`, fee 3000, spacing 60, no hook |
-| Reachable per fill | 23,750 tokens, which is 25% of the position after a 5% haircut |
-| Aqua strategy | `0x386716d5e39927fc3f8a1ddd45a9c09a6d96a059b52de2dbfcff8dcfd6e58d8d` |
+| Reachable per fill | 23,503 tokens, which is 25% of the position after a 5% haircut |
+| Aqua strategy | `0x9f853f6da4f2ad117c0a19545466e28be0343bf17f4d07067ffbcfa55d6e9da3` |
+| Program | `[0x92 unwind][0x51 concentrate][0x02 salt]`, 142 bytes, the curve bounded by the position's own range |
 
 The vault was redeployed once the position existed, because `TOKEN_ID` is immutable and the first deployment
 predated the pool. That is the whole reason the address above differs from the one in the deploy transaction.
@@ -55,7 +56,7 @@ There is no simultaneity here and the pitch should never claim any. The position
 
 | Step | Where | What happens |
 |---|---|---|
-| 1 | `runLoop` | Instruction `0x92` reads the vault's free float and the position's liquidity, and clamps `balanceOut` to what is genuinely reachable. The curve then prices against the truth. |
+| 1 | `runLoop` | Instruction `0x92` reads the vault's free float and the position's liquidity, and clamps `balanceOut` to what is genuinely reachable. Instruction `0x51` then prices against the truth, on the position's own range, and clamps its own output at the same number if the taker asked for more. |
 | 2 | `SwapVM.sol:310-314` | `preTransferOut` fires. The vault executes the `/lp/decrease` calldata against the v4 PositionManager. The position unwinds, the vault receives the output token. |
 | 3 | `SwapVM.sol:321` → `Aqua.sol:63-70` | `AQUA.pull` runs on the very next statement and pays the taker. |
 | 4 | `SwapVM.sol:262` | `AQUA.push` credits the vault with the taker's input. |
@@ -73,6 +74,37 @@ It is **fully `view`**. It writes no storage, so quote/swap consistency, the onl
 balanceOut = min(balanceOut, float + reachable)
 reachable  = positionLiquidity x unitsPerLiquidity x maxUnwindPct x (1 - haircut)
 ```
+
+## The curve
+
+The program prices on `XYCConcentrateSwap`, opcode `0x51`, and not on `XYCSwap`, `0x50`. Two reasons, and both
+are load bearing.
+
+**`0x50` never clamps its own output.** Once `0x92` has lowered `balanceOut` to what the position can genuinely
+release, a taker asking exact-out for more than that gets an arithmetic panic out of the VM:
+`amountIn = ceilDiv(amountOut * balanceIn, balanceOut - amountOut)` underflows above the balance and divides by
+zero at it. `XYCConcentrate` clamps on `balanceOut` and re-solves the other side for the clamped amount, in both
+directions. The same moment becomes an exact partial: the taker is paid exactly the reachable collateral and
+charged exactly what that costs. `TakerTraitsLib.validate` was written for this, it requires
+`takerAmount >= amountOut`, never equality, so a partial is a legal fill and not a tolerated accident. Both
+halves are asserted in `test_ExactOut_AboveReachableCollateral_IsAnExactPartialInsteadOfARevert`.
+
+**Its two arguments are the position.** `0x51` takes `sqrtPriceMin` and `sqrtPriceMax`, and `yarn aqua` fills
+them from the position's tick bounds and the live `sqrtRatioX96` returned by `POST /lp/pool_info`, then compiles
+them into the program bytes. The book's curve is the range of the Uniswap position backing it. Re-range the
+position and the book concentrates with it, which is
+`test_ExactIn_ClampedFill_ReSolvesTheInputAndSettles`: on a range of 0.25 to 4, a taker offering 3,000 is
+charged 1,693.61 and paid the whole 475 of reachable collateral, where `0x50` charges the full 3,000 and pays
+109.62.
+
+One honest detail. This position is full range, ticks `-887220` to `887220`, and full range does not survive the
+instruction's 1e18 fixed point: `sqrt(1.0001^-887220)` is `5.4e-20`, which truncates to zero, and
+`XYCConcentrateArgsBuilder.build2D` rejects a zero lower bound with `ConcentrateInvalidPriceBounds`. The shipped
+bounds are therefore the range clamped to the widest window the format carries, a factor of `1e9` on the sqrt
+price either side of spot, which is `1e9` and `1e27` in the strategy record and ticks `-414486` to `414486`. At
+that width the virtual reserves add about a billionth of the real ones, so the curve is constant product to nine
+significant digits and it is the clamp that changed, not the price: `915.372435469721101398` out against
+`915.372435390345788254` on `0x50`, a difference of 79 gwei of token on 915 tokens.
 
 ## The vault, and taker supplied calldata
 
@@ -111,7 +143,7 @@ The API is the funding mechanism, not a data source. Qualifying function claimed
 
 | Endpoint | Called from | Role |
 |---|---|---|
-| `POST /lp/pool_info` | `solver/src/uniswap.ts` | Pool state and tick, sizes the clip and mirrors the position range into the Aqua program |
+| `POST /lp/pool_info` | `solver/src/aqua.ts` | **Once per strategy.** Its `sqrtRatioX96` and the position's ticks become the two arguments of instruction `0x51`, compiled into the program bytes. The response is a parameter, not a display value |
 | `POST /lp/check_approval` | `solver/src/setup.ts` | With `generatePermitAsTransaction: true`, returns permits as executable transactions instead of EIP-712 typed data. This is what makes a contract owned position possible: the vault cannot sign, only execute |
 | `POST /lp/create` | `solver/src/setup.ts` | Opens the pool and the position through `newPool`, so the demo owns its own pool and depends on no pre-existing testnet liquidity |
 | `POST /lp/decrease` | `solver/src/uniswap.ts` | **Once per fill.** Its calldata goes verbatim into the `preTransferOutHookData` slice of `TakerTraits` and is executed by `BebecitaVault.preTransferOut` |
@@ -128,7 +160,7 @@ See [FEEDBACK.md](FEEDBACK.md) for what we found while integrating.
 yarn install
 cp .env.example .env          # fill UNISWAP_API_KEY and DEPLOYER_PRIVATE_KEY
 yarn gate0                    # six checks that decide whether the project exists
-yarn test                     # 11 tests, no network needed
+yarn test                     # 16 tests, no network needed
 forge script contracts/script/Deploy.s.sol --rpc-url sepolia --broadcast --verify
 yarn setup                    # pool, position, vault custody, all through the LP API
 yarn aqua                     # opens the strategy the book quotes
@@ -162,12 +194,19 @@ for a program Aqua has never seen, ships that one from the vault with the same b
 parameters, and leaves the taker approved. Nothing else moves: same pool, same position, same vault, same
 router, one byte of difference in a no-op instruction.
 
-| First fill on Sepolia | [`0xe0a395b7…`](https://sepolia.etherscan.io/tx/0xe0a395b72e3ac659b226712a963b23c1173d2ccf3f9e95d84b028494a67bcc84) |
+| Latest fill on Sepolia | [`0x26ded0dc…`](https://sepolia.etherscan.io/tx/0x26ded0dc9a6a4cf3532ad860a79e3bdf04aaa31d77d24d14b54df6565b4d781d) |
 |---|---|
-| Swapped | 1,000 bBRAVO in, 23.726273726273726275 bALPHA out |
-| Unwind | 1% of the position, released 999.99 bALPHA against 23.72 owed, surplus kept as float |
-| Redeposit | liquidity back from 99,000.00 to 99,956.74 in the same transaction |
-| Gas | 357,464 |
+| Program | `0x92` unwind, `0x51` concentrate bounded by the position, `0x02` salt |
+| Swapped | 1,000 bBRAVO in, 915.372435469721101398 bALPHA out |
+| Unwind | 1% of the position, released 989.63 bALPHA against 915.37 owed, surplus kept as float |
+| Redeposit | liquidity back from 97,973.40 to 98,048.18 in the same transaction |
+| Gas | 326,854 |
+
+The first fill this project ever ran is
+[`0xe0a395b7…`](https://sepolia.etherscan.io/tx/0xe0a395b72e3ac659b226712a963b23c1173d2ccf3f9e95d84b028494a67bcc84),
+1,000 bBRAVO for 23.72 bALPHA. The price is not a market move, it is the shipped book: that fill quoted before
+the input side was shipped from `reachableFromPosition` instead of generously, which is what brought the book
+back to something a human can read.
 
 ## Frontend
 
@@ -191,7 +230,7 @@ contracts/src/opcodes/        BebecitaOpcodes, the Aqua table plus 0x92 and thre
 contracts/src/routers/        BebecitaRouter, the redeployed SwapVM pointing at the official Aqua
 contracts/src/vault/          BebecitaVault, the maker: position custody, hooks, URC-3 reporting
 contracts/src/interfaces/     IHookStats (URC-3)
-contracts/test/               11 tests including the negative moment and the four guards
+contracts/test/               16 tests including the negative moment, the partial fills and the four guards
 contracts/script/             Sepolia deployment, and the fill, where the taker traits are encoded
 solver/src/                   Uniswap LP API client, gate zero, setup, the Aqua strategy, fill orchestration
 app/                          landing page and dashboard, Vite plus React plus viem

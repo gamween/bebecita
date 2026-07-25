@@ -81,6 +81,26 @@ word for it.
 from `swap-vm` main on 2026-07-03 by PR #140. Following the official example does not compile. Copy
 `AquaOpcodesDebug.sol` instead. Reported in `FEEDBACK.md`.
 
+## Curve: XYCConcentrate 0x51, bounded by the position
+
+`XYCSwap` was the obvious first choice and it is the wrong one. It never clamps its own output, so the moment
+instruction `0x92` lowers `balanceOut` below what a taker asked for, an exact-out order gets an arithmetic
+panic out of the VM rather than an answer. `XYCConcentrate` clamps on `balanceOut` and re-solves the other
+side, in both directions, which is the partial fill behaviour the sponsor's own `TakerTraitsLib.validate` is
+written to accept.
+
+That is the reason to switch. The second reason is what makes it ours: `0x51` takes two price bounds, and they
+are the tick bounds of the position that funds the book, read from `POST /lp/pool_info` at ship time and
+compiled into the program.
+
+Full range does not fit the instruction's 1e18 fixed point, `sqrt(1.0001^-887220)` truncating to zero, and the
+choice made instead is written at the constant in `solver/src/aqua.ts`: clamp the range to a factor of `1e9` on
+the sqrt price either side of the live spot, which is ticks `-414486` to `414486`. Nothing is fabricated. A
+narrower position compiles its own real ticks and the book concentrates with it.
+
+The price did not move on this. Measured on the fill that shipped it, `915.372435469721101398` out against
+`915.372435390345788254` for the same balances on `0x50`, which is a relative difference of `8.7e-11`.
+
 ## Ruled out on purpose
 
 The instruction as a wrapper with a nested `runLoop`. Four hours on the only component of the critical path,
@@ -88,6 +108,12 @@ for a gain invisible on screen, when guard one already enforces a floor.
 
 A second instruction at `0x93` for minimum fill size. The answer to a thin contribution is a composed program,
 not a second opcode.
+
+Shipping `0x51` with a tight range on a full range position, which would have made the exact-in clamp reachable
+at a small clip and looked better on stage. It is false, and worse, it is self defeating: a concentrated curve
+pins the marginal price inside its own bounds, so the book would quote near parity even with the enormous
+output balance shipped, and the removal test would stop biting. Running without `0x92` has to overstate depth
+by a factor of forty, and a range invented for the demo would have quietly bought that away.
 
 `Decay` in the program stack. Its NatSpec announces a quote versus swap divergence, and that invariant is the
 one thing we claim structurally.

@@ -553,13 +553,59 @@ async function main() {
     sqrtPriceMax: bounds.sqrtPriceMax,
   })
 
+  /** Everything `yarn fill` and `yarn demo:reset` need to rebuild this exact order, byte for byte. */
+  const writeStrategyRecord = (shipTx: Hex): void => {
+    deployments.strategy = {
+      orderHash: routerHash,
+      salt,
+      shipped: { token0: amount0.toString(), token1: amount1.toString() },
+      reachableAtShip: reachable.toString(),
+      haircutBps: HAIRCUT_BPS,
+      maxUnwindPct: MAX_UNWIND_PCT,
+      unitsPerLiquidityE18: UNITS_PER_LIQUIDITY_E18.toString(),
+      // The two curve bounds are part of the program bytes, so `strategy.ts` rebuilds the order from these
+      // and never recomputes them: a tick converted twice must not be allowed to differ by one wei.
+      sqrtPriceMin: bounds.sqrtPriceMin.toString(),
+      sqrtPriceMax: bounds.sqrtPriceMax.toString(),
+      curve: {
+        instruction: '0x51 XYCConcentrateSwap',
+        tickLower: pool.tickLower,
+        tickUpper: pool.tickUpper,
+        sqrtPriceSpotAtShip: bounds.sqrtPriceSpot.toString(),
+        sqrtRatioX96AtShip: String(live.sqrtRatioX96),
+        currentTickAtShip: live.currentTick,
+        sqrtPriceMinFromTick: bounds.fromTicks.lower.toString(),
+        sqrtPriceMaxFromTick: bounds.fromTicks.upper.toString(),
+        clampedLower: bounds.clampedLower,
+        clampedUpper: bounds.clampedUpper,
+      },
+      order: { maker: order.maker, traits: order.traits.toString(), data: order.data },
+      shipTx,
+    }
+    writeFileSync(DEPLOYMENTS, `${JSON.stringify(deployments, null, 2)}\n`)
+  }
+
   const hash = await wallet.writeContract({
     address: vault,
     abi: vaultAbi,
     functionName: 'ship',
     args: [router, strategy, [token0, token1], [amount0, amount1]],
   })
-  const receipt = await publicClient.waitForTransactionReceipt({ hash })
+
+  writeStrategyRecord(hash)
+  info('sent            ', hash)
+
+  // The public Sepolia endpoints are slow enough to blow through viem's default wait, and losing the record to
+  // a timeout is the worst outcome available: the strategy is live, a salt is spent, and nothing on disk says
+  // so. Hence the record above, written the moment the transaction is sent rather than once it confirms.
+  const receipt = await publicClient
+    .waitForTransactionReceipt({ hash, timeout: 600_000, pollingInterval: 2_000 })
+    .catch(() => {
+      throw new Error(
+        `ship ${hash} has not confirmed yet. deployments/sepolia.json already describes it, so check the ` +
+          'transaction and run yarn fill once it lands. Do not rerun this command, it would spend a salt.',
+      )
+    })
   if (receipt.status !== 'success') {
     throw new Error(`ship reverted, ${hash}. A repeated strategy hash reverts with StrategiesMustBeImmutable`)
   }
@@ -581,35 +627,6 @@ async function main() {
   if (balance0 !== amount0 || balance1 !== amount1) {
     throw new Error('Aqua stored a different balance than the one shipped')
   }
-
-  deployments.strategy = {
-    orderHash: routerHash,
-    salt,
-    shipped: { token0: amount0.toString(), token1: amount1.toString() },
-    reachableAtShip: reachable.toString(),
-    haircutBps: HAIRCUT_BPS,
-    maxUnwindPct: MAX_UNWIND_PCT,
-    unitsPerLiquidityE18: UNITS_PER_LIQUIDITY_E18.toString(),
-    // The two curve bounds are part of the program bytes, so `strategy.ts` rebuilds the order from these and
-    // never recomputes them: a tick converted twice must not be allowed to differ by one wei.
-    sqrtPriceMin: bounds.sqrtPriceMin.toString(),
-    sqrtPriceMax: bounds.sqrtPriceMax.toString(),
-    curve: {
-      instruction: '0x51 XYCConcentrateSwap',
-      tickLower: pool.tickLower,
-      tickUpper: pool.tickUpper,
-      sqrtPriceSpotAtShip: bounds.sqrtPriceSpot.toString(),
-      sqrtRatioX96AtShip: String(live.sqrtRatioX96),
-      currentTickAtShip: live.currentTick,
-      sqrtPriceMinFromTick: bounds.fromTicks.lower.toString(),
-      sqrtPriceMaxFromTick: bounds.fromTicks.upper.toString(),
-      clampedLower: bounds.clampedLower,
-      clampedUpper: bounds.clampedUpper,
-    },
-    order: { maker: order.maker, traits: order.traits.toString(), data: order.data },
-    shipTx: hash,
-  }
-  writeFileSync(DEPLOYMENTS, `${JSON.stringify(deployments, null, 2)}\n`)
 
   console.log('\nStrategy open. The book quotes against it now.')
   info('written to      ', 'deployments/sepolia.json')
