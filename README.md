@@ -139,6 +139,18 @@ there is reused rather than duplicated, and `--recreate` opens a second one. `ya
 on every run, because a strategy hash can be shipped exactly once and the second run would otherwise revert
 with `StrategiesMustBeImmutable`.
 
+## Frontend
+
+```bash
+cd app && yarn install && yarn dev     # http://localhost:5173
+```
+
+A landing page and a dashboard, Vite plus React plus TypeScript plus viem, no wallet kit. The dashboard reads
+the position, the vault and the Aqua balances live from Sepolia, calls `quote()` through a staticcall, calls
+the Uniswap LP API for real, and shows every API request and response with its response headers. Addresses are
+read at runtime from `deployments/sepolia.json` and `solver/src/config.ts`, never copied. See
+[app/README.md](app/README.md).
+
 Iteration discipline, measured on the build machine: a full `forge build` costs **3 min 49** because of `via_ir`, `forge build --skip test` costs **17 s**, and `forge test --match-path <one file>` costs **13 s**. Never run the bare commands.
 
 ## Layout
@@ -152,6 +164,9 @@ contracts/src/interfaces/     IHookStats (URC-3)
 contracts/test/               11 tests including the negative moment and the four guards
 contracts/script/             Sepolia deployment
 solver/src/                   Uniswap LP API client, gate zero, setup, the Aqua strategy, fill orchestration
+
+solver/src/                   Uniswap LP API client, gate zero checker, fill orchestration
+app/                          landing page and dashboard, Vite plus React plus viem
 docs/                         architecture, onboarding, demo script, decisions
 ```
 
