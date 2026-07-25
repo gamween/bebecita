@@ -62,6 +62,17 @@ contract Fill is Script {
             taker, amountOutMin, decreaseCalldata, increaseCalldata
         );
 
+        // The fixtures in `contracts/test/TakerTraits.t.sol` prove the TypeScript port on shapes we chose.
+        // This proves it on the payloads the Uniswap API actually built for the last fill, which are 676 and
+        // 708 bytes of live v4 Actions and were not chosen by anyone.
+        if (vm.keyExistsJson(json, ".takerTraitsAndData")) {
+            require(
+                keccak256(vm.parseJsonBytes(json, ".takerTraitsAndData")) == keccak256(takerTraitsAndData),
+                "solver/src/takerTraits.ts and TakerTraitsLib.build disagree on this fill"
+            );
+            console.log("taker traits     ", "TypeScript port matches TakerTraitsLib.build byte for byte");
+        }
+
         console.log("router           ", router);
         console.log("taker            ", taker);
         console.log("amount in        ", amount);

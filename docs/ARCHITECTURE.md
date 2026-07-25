@@ -223,7 +223,12 @@ on the same arguments and asserts byte equality across twelve shapes: empty slic
 threshold, both conditional slices, every flag combination the project uses and its opposite. It then round
 trips the live fill shape back through the library's own slice readers, which is what proves the unwind comes
 out of `preTransferOut` and the redeposit out of `postTransferIn` rather than the other way round.
-`contracts/script/Fill.s.sol` stays as the Solidity reference that diff is taken against.
+
+`contracts/script/Fill.s.sol` stays as the Solidity reference that diff is taken against, and it repeats the
+assertion on inputs nobody chose. Every `yarn fill` writes its request to `deployments/fill.local.json`
+including the traits it built, and replaying that file through the script compares them against
+`TakerTraitsLib.build` on the real v4 Actions payloads of that fill before it simulates the swap. Fixtures
+prove the arithmetic on shapes we picked; that check proves it on shapes the Uniswap API picked.
 
 ## The solver, and why it being off chain is not the question
 
