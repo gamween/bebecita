@@ -75,7 +75,8 @@ offending member. The third leaks an internal protobuf message type, and a reade
 a `CreateToken` enum that does not exist in any published schema.
 
 Suggestion: report unknown keys by name, and settle on one spelling of the position identifier across the seven
-LP paths.
+LP paths. The last row is the one that outlived the create flow and cost time again during settlement, so it is
+written up on its own in finding 10.
 
 ### 7. `/lp/create` accepts a contract as `walletAddress` and returns a transaction most contracts cannot execute
 
@@ -104,9 +105,48 @@ Permit2 call specifically, since Permit2's `approve` is not an ERC20 `approve`. 
 
 Suggestion: say in the LP guide that v4 approvals are two legged, and that the second leg is the funding one.
 
+### 9. `nftTokenId` must be a JSON string, and a JSON number is rejected as an undecodable value
+
+`/lp/decrease` and `/lp/increase` both take the position as `nftTokenId`. The obvious encoding for an integer
+identifier is a JSON number, and it fails.
+
+```
+$ curl -X POST https://liquidity.api.uniswap.org/lp/decrease -d '{..., "nftTokenId": 37804, ...}'
+400 {"code":"invalid_argument","message":"cannot decode field
+     uniswap.liquidity.v2.DecreasePositionRequest.nft_token_id from JSON: 37804"}
+```
+
+The same request with `"nftTokenId": "37804"` returns the calldata.
+
+Impact: the message names the value, `37804`, which is a perfectly valid tokenId, so it reads as "this
+position does not exist" rather than "this type is wrong". We lost a round trip checking the position on chain
+before rereading the request. The response also leaks the internal protobuf field name, `nft_token_id`, which
+does not appear in the published schema and cannot be sent either.
+
+Suggestion: accept a JSON number for an integer field, or say `expected string` in the error.
+
+### 10. `/lp/claim_fees` names the position `tokenId`, where its two siblings name it `nftTokenId`
+
+Three endpoints in the same document take the same position identifier under two different names.
+`/lp/decrease` and `/lp/increase` want `nftTokenId`. `/lp/claim_fees` wants `tokenId` and rejects `nftTokenId`.
+
+```
+$ curl -X POST https://liquidity.api.uniswap.org/lp/claim_fees -d '{..., "nftTokenId": "37804"}'
+400 {"code":"invalid_argument","message":"RequestValidationError: ClaimFeesRequest validation error:
+     \"tokenId\" is not allowed to be empty"}
+```
+
+Impact: the error names `tokenId`, the field that is absent, and never mentions `nftTokenId`, the field that
+was sent. It therefore reads as an empty value rather than an unrecognised key, and the natural next move is
+to check the value rather than the name. This is the same failure shape as the `lpTokens[0].tokenAddress`
+message in finding 6, and it is worth calling out separately because here the correct name is different on
+neighbouring endpoints rather than merely misspelled.
+
+Suggestion: accept `nftTokenId` on `/lp/claim_fees` as an alias, and report unknown keys by name.
+
 ## 1inch
 
-### 9. The custom SwapVM example in `1inch/sdks` no longer compiles against `swap-vm@main`
+### 11. The custom SwapVM example in `1inch/sdks` no longer compiles against `swap-vm@main`
 
 `contracts/src/swap-vm/TestCustomSwapVM.sol` uses `_instructions()`, `_opcodes()` and `_notInstruction` with
 a static function pointer array. `swap-vm` moved to direct dispatch via `_runOpcode(Context, uint256, bytes)`
@@ -117,7 +157,7 @@ rather than at the change.
 
 Suggestion: update the sample, or copy the shape of `AquaOpcodesDebug.sol`, which is the pattern that works.
 
-### 10. Three `Controls` instructions are unreachable from the Aqua opcode table
+### 12. Three `Controls` instructions are unreachable from the Aqua opcode table
 
 `Stop` (0x00), `Revert` (0x01) and `JumpIfDirection` (0x30) exist in `Controls.sol`, are dispatched by the
 full `Opcodes` table, and are absent from `AquaOpcodes`. An Aqua program using any of them reverts with
@@ -129,7 +169,7 @@ Reproduce: build a program containing opcode `0x00` and run it through `AquaSwap
 
 Suggestion: three `else if` branches in `AquaOpcodes._runOpcode`. Our `BebecitaOpcodes` carries them.
 
-### 11. The canonical instruction ordering makes protocol fees unusable for a capital efficient maker
+### 13. The canonical instruction ordering makes protocol fees unusable for a capital efficient maker
 
 The SwapVM whitepaper gives the canonical ordering as `aquaProtocolFee`, then the swap instruction, then
 `flatFee`. But `_aquaProtocolFeeAmountInXD` pulls `tokenIn` from the maker during `runLoop`, before the taker
@@ -141,7 +181,7 @@ efficient, therefore cannot pay a protocol fee at all. The only usable fee instr
 
 Suggestion: a protocol fee variant that settles after `_transferIn`, or that draws on `amountNetPulled`.
 
-### 12. No testnet deployment is documented, although one exists
+### 14. No testnet deployment is documented, although one exists
 
 The Aqua README lists 13 mainnet deployments and no testnet. The official Aqua is in fact deployed on
 Ethereum Sepolia at `0x499943E74FB0cE105688beeE8Ef2ABec5D936d31`, the canonical address, with bytecode
