@@ -65,5 +65,44 @@
     "unwindPercent": 1,
     "gasUsed": "326854",
     "blockNumber": "11350616"
+  },
+  "rebalance": {
+    "at": "2026-07-25T23:38:14.250Z",
+    "sold": {
+      "token": "0x0128Ac6B5E3364b022e55A0cf9c0cb4987B3B20f",
+      "amount": "10363052555594390919312",
+      "symbol": "bBRAVO"
+    },
+    "bought": {
+      "token": "0xdB41CB0A2EEFF8Ed53Ef019D4C9826744f500B7F",
+      "amount": "9290224149469301523275",
+      "symbol": "bALPHA"
+    },
+    "deposited": {
+      "token0": "11491925814445243361679",
+      "token1": "9291364139122209881215"
+    },
+    "before": {
+      "float0": "21859614569661051938456",
+      "float1": "2069218989754263519",
+      "liquidity": "92140385430338948066539",
+      "reachable": "21883341539705500165802",
+      "sqrtPriceX96": "79228162514264337593543950336"
+    },
+    "after": {
+      "float0": "35725357288200830223",
+      "float1": "929229336845905580",
+      "liquidity": "102473616648200538588735",
+      "reachable": "24337483953947627914823",
+      "sqrtPriceX96": "71239837033853012859205292019"
+    },
+    "unitsPerLiquidityE18Measured": "899173157285162373",
+    "txs": {
+      "sweep": "0x34fc60564192aaf654f4ae0acd75ea610f7b056599aa102c2381ca62ecef89f0",
+      "approve": "0x80989fec2d8236bc815442dda7ea871dbbe969e59f314e4a53c171f9ef68f757",
+      "swap": "0x6c8f9009f891da976373d016dbce77fc1547416a812dd6499d1093f6f4707f8d",
+      "returnToVault": "0x2b4c1e3c0572bc787e40bef583189065bd22d8c52e8da4d880ecc8a20ee58a0c",
+      "increase": "0x2a3792a24f3f44cd8d9a3ef28c52390565f87f02bff6f129477e83a0ccf0603e"
+    }
   }
 }
