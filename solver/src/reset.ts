@@ -72,7 +72,10 @@ async function main() {
   const aqua = getAddress(deployments.aqua)
   const vault = current.params.vault
   const { token0, token1 } = current
-  const shippedBalance = BigInt(current.record.shippedBalance)
+  // The two sides are shipped asymmetrically, the input side just above what the position can release and the
+  // output side generously, so a reset that shipped one figure twice would quote a different book.
+  const shipped0 = BigInt(current.record.shipped.token0)
+  const shipped1 = BigInt(current.record.shipped.token1)
 
   console.log('\nBebecita demo reset, Ethereum Sepolia')
   info('vault           ', vault)
@@ -145,7 +148,7 @@ async function main() {
     address: vault,
     abi: vaultAbi,
     functionName: 'ship',
-    args: [router, strategy, [token0, token1], [shippedBalance, shippedBalance]],
+    args: [router, strategy, [token0, token1], [shipped0, shipped1]],
   })
   const receipt = await publicClient.waitForTransactionReceipt({ hash })
   if (receipt.status !== 'success') {
@@ -159,7 +162,7 @@ async function main() {
     functionName: 'safeBalances',
     args: [vault, router, chosen.hash, token0, token1],
   })
-  if (balance0 !== shippedBalance || balance1 !== shippedBalance) {
+  if (balance0 !== shipped0 || balance1 !== shipped1) {
     throw new Error('Aqua stored a different balance than the one shipped')
   }
   info('aqua balances   ', `${formatUnits(balance0, 18)} / ${formatUnits(balance1, 18)}`)
