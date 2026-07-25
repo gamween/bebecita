@@ -457,10 +457,21 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
   const decimalsB = snapshot?.tokenB.decimals.ok ? snapshot.tokenB.decimals.value : 18
   const symbolA = snapshot?.tokenA.symbol.ok ? snapshot.tokenA.symbol.value : 'token A'
   const symbolB = snapshot?.tokenB.symbol.ok ? snapshot.tokenB.symbol.value : 'token B'
-  const inSymbol = aToB ? symbolA : symbolB
-  const outSymbol = aToB ? symbolB : symbolA
-  const inDecimals = aToB ? decimalsA : decimalsB
-  const outDecimals = aToB ? decimalsB : decimalsA
+  // `isAToB` is a taker trait, and the VM reads it against the order's own tokens, which are stored sorted.
+  // So the direction is token0 to token1 and not tokenA to tokenB: on this pair the two are not the same, and
+  // labelling it from the deployment record would name the wrong side of every fill.
+  const token0 = snapshot?.vault.keyUsed.currency0 ?? null
+  const token1 = snapshot?.vault.keyUsed.currency1 ?? null
+  const metaOf = (token: Address | null) =>
+    snapshot && token ? tokenOf(snapshot, token) : { symbol: 'token', decimals: 18 }
+  const symbol0 = token0 ? metaOf(token0).symbol : 'token0'
+  const symbol1 = token1 ? metaOf(token1).symbol : 'token1'
+  const inMeta = metaOf(aToB ? token0 : token1)
+  const outMeta = metaOf(aToB ? token1 : token0)
+  const inSymbol = inMeta.symbol
+  const outSymbol = outMeta.symbol
+  const inDecimals = inMeta.decimals
+  const outDecimals = outMeta.decimals
 
   const tokenId = snapshot?.uniswap.tokenId ?? null
   const vaultAddress = config?.deployment.vault ?? null
@@ -474,23 +485,28 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
 
   const slac = useMemo(() => slacOf(snapshot), [snapshot])
 
-  /** Settled volume, per input token, so a two directional book is never summed into one wrong number. */
+  /**
+   * Settled volume, per input token, so a two directional book is never summed into one wrong number.
+   *
+   * Derived from the logs alone. The token metadata comes from the snapshot when it has arrived, and from the
+   * address itself when it has not, because the volume is a fact about the chain either way.
+   */
   const volume = useMemo(() => {
-    if (!history || !snapshot) return null
-    const total = settled(history.fills)
-    const byToken = new Map<string, bigint>()
+    if (!history) return null
+    const paidIn = new Map<string, bigint>()
+    const paidOut = new Map<string, bigint>()
     for (const entry of history.fills) {
-      byToken.set(entry.tokenIn, (byToken.get(entry.tokenIn) ?? 0n) + entry.amountIn)
+      paidIn.set(entry.tokenIn, (paidIn.get(entry.tokenIn) ?? 0n) + entry.amountIn)
+      paidOut.set(entry.tokenOut, (paidOut.get(entry.tokenOut) ?? 0n) + entry.amountOut)
     }
-    return {
-      count: total.count,
-      out: total.amountOut,
-      legs: [...byToken.entries()].map(([token, paid]) => ({
+    const legs = (totals: Map<string, bigint>) =>
+      [...totals.entries()].map(([token, value]) => ({
         token: token as Address,
-        paid,
-        ...tokenOf(snapshot, token as Address),
-      })),
-    }
+        value,
+        symbol: snapshot ? tokenOf(snapshot, token as Address).symbol : short(token, 6, 4),
+        decimals: snapshot ? tokenOf(snapshot, token as Address).decimals : 18,
+      }))
+    return { count: settled(history.fills).count, in: legs(paidIn), out: legs(paidOut) }
   }, [history, snapshot])
 
   const float: Result<bigint> = useMemo(() => {
@@ -678,10 +694,10 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
             onChange={(event) => setAToB(event.target.value === 'ab')}
           >
             <option value="ab">
-              {symbolA} to {symbolB}
+              {symbol0} to {symbol1}
             </option>
             <option value="ba">
-              {symbolB} to {symbolA}
+              {symbol1} to {symbol0}
             </option>
           </select>
         </div>
@@ -735,14 +751,16 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
           note="Swapped events on the router, summed per input token"
           sub={
             volume
-              ? `${volume.count} ${volume.count === 1 ? 'fill' : 'fills'}, ${fmtAmount(volume.out, outDecimals, 2)} paid back out`
+              ? `${volume.count} ${volume.count === 1 ? 'fill' : 'fills'}, paid back out: ${volume.out
+                  .map((leg) => `${fmtAmount(leg.value, leg.decimals, 2)} ${leg.symbol}`)
+                  .join(' , ') || 'nothing yet'}`
               : 'reading the logs'
           }
         >
-          {volume && volume.legs.length ? (
-            volume.legs.map((leg) => (
+          {volume && volume.in.length ? (
+            volume.in.map((leg) => (
               <div key={leg.token}>
-                <span className="num">{fmtAmount(leg.paid, leg.decimals, 2)}</span> <Unit>{leg.symbol}</Unit>
+                <span className="num">{fmtAmount(leg.value, leg.decimals, 2)}</span> <Unit>{leg.symbol}</Unit>
               </div>
             ))
           ) : history ? (
