@@ -50,14 +50,18 @@ npm run snapshot                                         # starts with a clean, 
 | `contracts/src/routers/BebecitaRouter.sol` | The redeployed SwapVM. Points at the official Aqua. |
 | `contracts/src/vault/BebecitaVault.sol` | The maker. Holds the position, implements the hooks and their four guards, reports URC-3. |
 | `contracts/test/Bebecita.t.sol` | Everything above, asserted. Start here to understand the system. |
+| `contracts/test/TakerTraits.t.sol` | The TypeScript traits builder, diffed byte for byte against `TakerTraitsLib.build`. Fixtures from `yarn fixtures`. |
+| `solver/src/takerTraits.ts` | The port of `TakerTraitsLib.build`. Imported by the browser too. Read it next to the Solidity. |
+| `solver/src/fillPlan.ts` | The fill: quote, sizing, the two LP calls, the traits. Runs in a terminal and in a tab, through injected interfaces. |
 | `solver/src/uniswap.ts` | LP API client. Read the header comment, it contains the host trap. |
 | `solver/src/gate0.ts` | The six checks that decide whether the project exists. |
 | `solver/src/setup.ts` | `yarn setup`. Pool, position, vault redeploy, ERC721 custody. Resumable. |
 | `solver/src/aqua.ts` | `yarn aqua`. Builds the order, ships it from the vault, checks the hash. Its builders are exported for the fill path. |
 | `solver/src/strategy.ts` | Rebuilds the live order from what `yarn aqua` recorded and refuses to continue unless the hash matches. |
-| `solver/src/fill.ts` | `yarn fill`. Quote, sizing, the two LP calls, the broadcast, and the receipt check. |
+| `solver/src/fill.ts` | `yarn fill`. The terminal half of `fillPlan`: a private key, the broadcast, and the receipt check. |
 | `solver/src/reset.ts` | `yarn demo:reset`. Walks the salt space and re-ships, so the demo is replayable. |
-| `contracts/script/Fill.s.sol` | Where the taker traits are encoded, with `TakerTraitsLib.build`. Read the header comment before touching it. |
+| `app/src/lib/fill.ts` | The browser half of `fillPlan`: the connected wallet, the two API calls through the proxy, mint and approve. |
+| `contracts/script/Fill.s.sol` | The Solidity reference the traits port is diffed against. Not on the fill path. Read the header comment before touching it. |
 
 ## Things that will bite you
 

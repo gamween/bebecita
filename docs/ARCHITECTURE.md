@@ -196,6 +196,52 @@ the unwind as `amountOut / liquidity` and both terms carry the same factor: the 
 fix, when a maker wants that margin back, is to re-ship the book with the measured factor and to set the same
 number on the vault with `setRiskParams`, which is one command each and neither is on the fill path.
 
+## Where the fill runs
+
+In the tab, signed by the connected wallet. There is no backend, and the shape of the thing is the argument.
+
+`solver/src/fillPlan.ts` is the fill: quote through a staticcall, size the unwind from the `amountOut` that
+came back and round the percentage up, `POST /lp/decrease` and `POST /lp/increase`, encode the taker traits.
+It touches the chain and the API through two injected interfaces and therefore does not know where it is
+running. `yarn fill` gives it a viem HTTP transport and a private key, the dashboard gives it the same
+transport and `window.ethereum`, and neither owns a second copy of the arithmetic. The dev server proxies the
+Uniswap key and JSON-RPC and runs none of this project's logic.
+
+What used to force a process was one detail. `TakerTraitsLib.build` is `internal pure` Solidity, so it can
+only run inside a contract, and `forge` is not available in a browser. `solver/src/takerTraits.ts` ports it:
+a 22 byte header of ten `uint16` slice indexes packed into a `uint160` plus a `uint16` flag word, then the
+slices concatenated in the order the `TakerDataSlices` enum declares. Every index is the end offset of its
+slice, so each one is a running sum of the lengths before it, and the two conditional slices are the trap: a
+recipient equal to the taker encodes nothing at all, and a zero deadline encodes nothing rather than five zero
+bytes.
+
+The port is proved rather than asserted, because its failure mode is silent. A slice index one byte off does
+not fail to decode, it decodes a different slice, and the revert that reaches the taker is
+`TakerTraitsAmountOutMustBeGreaterThanZero`, which names the amount and not the header.
+`contracts/test/TakerTraits.t.sol` reads the fixtures `yarn fixtures` writes, calls the sponsor's own library
+on the same arguments and asserts byte equality across twelve shapes: empty slices, one hook, both hooks, a
+threshold, both conditional slices, every flag combination the project uses and its opposite. It then round
+trips the live fill shape back through the library's own slice readers, which is what proves the unwind comes
+out of `preTransferOut` and the redeposit out of `postTransferIn` rather than the other way round.
+`contracts/script/Fill.s.sol` stays as the Solidity reference that diff is taken against.
+
+## The solver, and why it being off chain is not the question
+
+A solver is off-chain by nature in any RFQ system. 1inch's own Fusion works that way: the maker signs an
+intent, resolvers compete off chain, and the chain sees only the settlement. Aqua is the same shape, since a
+strategy is a number in a mapping and somebody outside has to decide when to pull against it.
+
+So the question is never whether a solver runs off chain, it is whether the maker has to trust it. This maker
+does not. The order is immutable, the vault's parameters are immutable, and the one thing the taker supplies
+per fill, the withdrawal calldata, is judged on chain by the four guards above rather than believed. An
+adversarial taker chooses how the position is unwound and never whether the maker ends up short, never what
+the vault ends up owning, and never more than `maxUnwindPct` of the collateral in one fill.
+
+That is why the taker being a browser tab changes nothing about the security model, and why deleting the
+backend cost nothing: there was no trust placed in it to remove. It also makes the demo self serve, which is
+worth more than it sounds. `TestERC20.mint` is public, the dashboard has a button for it and a button for the
+router approval, and a judge can fill against this maker from their own wallet.
+
 ## URC-3
 
 The vault implements `IHookStats` from URC-3, published by Uniswap Labs on 2026-06-11. The standard's

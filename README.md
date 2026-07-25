@@ -189,9 +189,9 @@ The API is the funding mechanism, not a data source. Qualifying function claimed
 | `POST /lp/pool_info` | `solver/src/aqua.ts` | **Once per strategy.** Its `sqrtRatioX96` and the position's ticks become the two arguments of instruction `0x51`, compiled into the program bytes. The response is a parameter, not a display value |
 | `POST /lp/check_approval` | `solver/src/setup.ts` | With `generatePermitAsTransaction: true`, returns permits as executable transactions instead of EIP-712 typed data. This is what makes a contract owned position possible: the vault cannot sign, only execute |
 | `POST /lp/create` | `solver/src/setup.ts` | Opens the pool and the position through `newPool`, so the demo owns its own pool and depends on no pre-existing testnet liquidity |
-| `POST /lp/decrease` | `solver/src/uniswap.ts` | **Once per fill.** Its calldata goes verbatim into the `preTransferOutHookData` slice of `TakerTraits` and is executed by `BebecitaVault.preTransferOut` |
-| `POST /lp/increase` | `solver/src/uniswap.ts` | Same fill. Its calldata goes into `postTransferInHookData` and is executed by `BebecitaVault.postTransferIn` |
-| `POST /lp/claim_fees` | `solver/src/uniswap.ts` | Closing panel: the fees the same capital earned while it was quoting |
+| `POST /lp/decrease` | the browser, or `solver/src/uniswap.ts` | **Once per fill.** Its calldata goes verbatim into the `preTransferOutHookData` slice of `TakerTraits` and is executed by `BebecitaVault.preTransferOut` |
+| `POST /lp/increase` | the browser, or `solver/src/uniswap.ts` | Same fill. Its calldata goes into `postTransferInHookData` and is executed by `BebecitaVault.postTransferIn` |
+| `POST /lp/claim_fees` | the browser, or `solver/src/uniswap.ts` | Closing panel: the fees the same capital earned while it was quoting |
 
 **Note for the reviewer.** The `/lp/*` operations belong to the same OpenAPI document as `trade-api.gateway.uniswap.org/v1` and use the same `x-api-key` scheme, but the document carries a per-path server override and they are served from `https://liquidity.api.uniswap.org` with no version prefix. Grepping our request logs for `trade-api` will find nothing, which is why this is stated here rather than left to be discovered.
 
@@ -203,7 +203,7 @@ See [FEEDBACK.md](FEEDBACK.md) for what we found while integrating.
 yarn install
 cp .env.example .env          # fill UNISWAP_API_KEY and DEPLOYER_PRIVATE_KEY
 yarn gate0                    # six checks that decide whether the project exists
-yarn test                     # 16 tests, no network needed
+yarn test                     # 19 tests, no network needed
 forge script contracts/script/Deploy.s.sol --rpc-url sepolia --broadcast --verify
 yarn setup                    # pool, position, vault custody, all through the LP API
 yarn aqua                     # opens the strategy the book quotes
@@ -224,29 +224,36 @@ yarn fill                     # quote, size, unwind, swap, redeposit, one transa
 yarn fill --amount=250        # a smaller clip
 yarn fill --dry               # simulate against live state and broadcast nothing
 yarn demo:reset               # re-salt the order and re-ship it, ready for a fresh fill
-yarn solver:serve             # the same fill behind POST /fill, for the dashboard button
 ```
 
 `yarn fill` reads the quote through `quote()` on a staticcall, which is what `asView()` exists for, sizes the
 withdrawal from the `amountOut` that came back, rounds the percentage up because
-`liquidityPercentageToDecrease` is an integer, fetches `/lp/decrease` and `/lp/increase`, and hands both
-payloads to `contracts/script/Fill.s.sol`. That script builds the taker traits with the sponsor's own
-`TakerTraitsLib.build`, asserts with `vm.expectCall` that each payload reaches the PositionManager exactly
-once, and broadcasts `swap()` from the taker. The receipt is then read back and the two `ModifyLiquidity`
-events are checked, so the claim is verified from the chain and not from the console.
+`liquidityPercentageToDecrease` is an integer, fetches `/lp/decrease` and `/lp/increase`, encodes the taker
+traits and sends `swap()` from the taker's own key. Then it reads the receipt back and checks the two
+`ModifyLiquidity` events, so the claim is verified from the chain and not from the console.
+
+The decisions all live in `solver/src/fillPlan.ts`, which reaches the chain and the API through two injected
+interfaces and therefore does not know where it is running. The command line supplies a private key and an
+`x-api-key` header, the browser supplies the connected wallet and the dev server proxy, and there is no second
+copy of the sizing arithmetic between them.
 
 `yarn demo:reset` exists because a strategy hash can be shipped exactly once, ever. It walks the salt space
 for a program Aqua has never seen, ships that one from the vault with the same balances and the same risk
 parameters, and leaves the taker approved. Nothing else moves: same pool, same position, same vault, same
 router, one byte of difference in a no-op instruction.
 
-| Latest fill on Sepolia | [`0x26ded0dc…`](https://sepolia.etherscan.io/tx/0x26ded0dc9a6a4cf3532ad860a79e3bdf04aaa31d77d24d14b54df6565b4d781d) |
+| Latest fill on Sepolia | [`0x2d06c096…`](https://sepolia.etherscan.io/tx/0x2d06c09613389cdd2260213d302a3ae3a2875c71e986b310595a3592adaafb55) |
 |---|---|
 | Program | `0x92` unwind, `0x51` concentrate bounded by the position, `0x02` salt |
-| Swapped | 1,000 bBRAVO in, 915.372435469721101398 bALPHA out |
-| Unwind | 1% of the position, released 989.63 bALPHA against 915.37 owed, surplus kept as float |
-| Redeposit | liquidity back from 97,973.40 to 98,048.18 in the same transaction |
-| Gas | 326,854 |
+| Swapped | 1,000 bBRAVO in, 879.312663104099977232 bALPHA out |
+| Unwind | 1% of the position, released 921.42 bALPHA against 879.31 owed, surplus kept as float |
+| Redeposit | liquidity back from 101,448.88 to 101,495.78 in the same transaction |
+| Gas | 343,942 |
+| Taker | `0xF29bCE83AF15acC7AdaaeaC34A5BE9165C52b4d0`, a wallet that funded itself through the public `mint` |
+
+That taker is not the deployer and holds nothing but what it minted itself, which is the point of the two
+buttons on the dashboard: the fill is signed by whoever is connected, and the maker's guards do not care who
+that is.
 
 The first fill this project ever ran is
 [`0xe0a395b7…`](https://sepolia.etherscan.io/tx/0xe0a395b72e3ac659b226712a963b23c1173d2ccf3f9e95d84b028494a67bcc84),
@@ -285,8 +292,7 @@ maker parameter it moves, and [docs/DECISIONS.md](docs/DECISIONS.md) for why thi
 ## Frontend
 
 ```bash
-yarn solver:serve                      # the fill, over HTTP, on 127.0.0.1:8787
-cd app && yarn install && yarn dev     # http://localhost:5173
+cd app && yarn install && yarn dev     # http://localhost:5173, and nothing else
 ```
 
 A landing page and a dashboard, Vite plus React plus TypeScript plus viem, no wallet kit. The dashboard reads
@@ -295,11 +301,37 @@ the Uniswap LP API for real, and shows every API request and response with its r
 read at runtime from `deployments/sepolia.json` and `solver/src/config.ts`, never copied. See
 [app/README.md](app/README.md).
 
-Its **Run a fill** button posts to `yarn solver:serve`, which runs `solver/src/fill.ts`, which is what
-`yarn fill` runs. The steps stream back as they happen and the transaction is then read back from its own
-receipt: the `Swapped` amounts, and the two PositionManager calls with the position's liquidity before and
-after each. Without that process the button says so and stays inert, because the fill is signed by the key
-that owns the vault and a browser tab does not hold it.
+**Run a fill** does the whole thing in the tab, signed by the connected wallet. It quotes, sizes the unwind,
+calls `/lp/decrease` and `/lp/increase`, encodes the taker traits and sends `swap()`. The transaction is then
+read back from its own receipt: the `Swapped` amounts, and the two PositionManager calls with the position's
+liquidity before and after each.
+
+The connected wallet is the taker, so it needs the input token and an allowance to the router. Both are one
+button away, **Mint** and **Approve the router**, because `TestERC20.mint` is public. A judge can drive the
+demo from their own wallet without asking anyone for anything.
+
+There is one port and no backend. The dev server proxies two things and runs none of this project's logic: it
+attaches the Uniswap key to `/api/uniswap` so the key never reaches the bundle, and it forwards JSON-RPC on
+`/api/rpc` so a private endpoint can stay out of it. The Uniswap gateway answers browser preflights on the
+`/lp/*` paths, so a build that carries its own key can call it with no proxy at all.
+
+### Why there is no solver process, and why one would not be a weakness either
+
+A solver is off-chain by nature in every RFQ system, including 1inch's own Fusion: the maker signs an intent,
+resolvers compete off chain, and the chain only ever sees the settlement. So the question is never whether a
+solver runs off chain, it is whether the maker has to trust it. Here it does not. The taker is whoever presses
+the button, the order and the vault are immutable, and everything the taker supplies per fill is judged on
+chain by `BebecitaVault`'s four guards: the output balance must grow by at least the amount the VM computed,
+the input side may not shrink, one fill may not unwind more than `maxUnwindPct` of the position, and a
+redeposit may only grow it. An adversarial taker therefore chooses how the position is unwound and never
+whether the maker ends up short. That is why deleting the backend cost this project nothing: there was no
+trust in it to remove. What kept the fill in a process was one detail, `TakerTraitsLib.build` being `internal
+pure` Solidity, and porting it removed the process.
+
+The port is not asserted, it is proved: `contracts/test/TakerTraits.t.sol` builds twelve argument shapes with
+the sponsor's own library and asserts byte equality against what `solver/src/takerTraits.ts` wrote for the
+same arguments, then round trips the live fill shape back through the library's own slice readers.
+`contracts/script/Fill.s.sol` stays in the repository as the Solidity reference that diff is taken against.
 
 The dashboard leads with **SLAC**, the Shared Liquidity Amplification Coefficient of the Aqua whitepaper,
 page 4: the total liquidity provisioned across every strategy this vault has shipped, over the wallet equity
@@ -319,10 +351,11 @@ contracts/src/opcodes/        BebecitaOpcodes, the Aqua table plus 0x92 and thre
 contracts/src/routers/        BebecitaRouter, the redeployed SwapVM pointing at the official Aqua
 contracts/src/vault/          BebecitaVault, the maker: position custody, hooks, URC-3 reporting
 contracts/src/interfaces/     IHookStats (URC-3)
-contracts/test/               16 tests including the negative moment, the partial fills and the four guards
-contracts/script/             Sepolia deployment, and the fill, where the taker traits are encoded
-solver/src/                   Uniswap LP API client, gate zero, setup, the Aqua strategy, fill orchestration
-app/                          landing page and dashboard, Vite plus React plus viem
+contracts/test/               19 tests: the negative moment, the partial fills, the four guards, the traits port
+contracts/script/             Sepolia deployment, and the Solidity reference for the taker traits
+solver/src/                   the fill plan and the taker traits, shared with the browser, plus the LP API
+                              client, gate zero, setup and the Aqua strategy
+app/                          landing page and dashboard, Vite plus React plus viem, and the taker
 docs/                         architecture, onboarding, demo script, decisions
 ```
 

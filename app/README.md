@@ -25,7 +25,8 @@ honest state while the position is being created.
 | Request a quote | `quote()` on BebecitaRouter through a staticcall, with taker traits built the way `TakerTraitsLib.build` builds them |
 | Claim fees | `POST /lp/claim_fees`, and the returned calldata can be executed through `vault.executeOnPositionManager` when the connected wallet is the vault owner |
 | Build unwind calldata | `POST /lp/decrease`, the payload that goes into the `preTransferOutHookData` slice of a real fill |
-| Run a fill | `POST /fill` on `yarn solver:serve`, which runs `solver/src/fill.ts`. See below |
+| Run a fill | `solver/src/fillPlan.ts` and `solver/src/takerTraits.ts`, in this tab, then `swap()` through the connected wallet. See below |
+| Mint and Approve | `TestERC20.mint` and `approve`, from the connected wallet, so the taker can fund itself |
 | The fill, after it lands | the transaction's own receipt: `Swapped` from the router, `Unwound` and `Redeposited` from the vault, `ModifyLiquidity` from the PoolManager |
 | Settled volume, and every strategy | `eth_getLogs`, `Swapped` on the router and `Shipped` on the vault, over a bounded window |
 | SLAC | the sum of `rawBalances` over every strategy found, over two denominators, both read on chain |
@@ -61,27 +62,44 @@ Two things the live gateway taught us, both worth a line in FEEDBACK.md:
 
 ## The fill button
 
-The fill is signed by the key that owns the vault, so it runs in a process and not in a tab. `src/lib/fill.ts`
-is the client for that process:
+The fill runs here, in the tab, signed by the connected wallet. There is no backend to start: one port, one
+command, `yarn dev`.
 
-```bash
-yarn solver:serve      # at the repository root, listens on 127.0.0.1:8787
-```
+`src/lib/fill.ts` is only the browser half of the environment the fill needs. The fill itself is
+`solver/src/fillPlan.ts`, imported from outside this package through the `@solver` alias declared in
+`vite.config.ts` and `tsconfig.json`, and it is the same module `yarn fill` runs at the repository root. This
+file supplies it with three things: chain reads through viem, the two Uniswap calls through the dev server
+proxy, and `swap()` through `window.ethereum`.
 
-The app posts to `VITE_SOLVER_URL` when the operator set one, and to `/api/solver` otherwise, which the dev
-server proxies to the same place. So the default needs no configuration and no CORS.
+The taker traits come from `solver/src/takerTraits.ts`, a port of the sponsor's `TakerTraitsLib.build`.
+`contracts/test/TakerTraits.t.sol` proves that port byte for byte against the library itself, which is what
+made deleting the backend possible: the builder is `internal pure` Solidity and `forge` does not run in a
+browser, and that single fact was the whole reason a process existed.
 
-`POST /fill` answers with newline delimited JSON, one event per line, and the page renders the six steps as
-they arrive rather than showing a spinner for forty seconds. The last event carries the transaction hash, and
-everything shown about the fill after that is decoded from the receipt rather than repeated from the solver:
-the `Swapped` amounts, then the two PositionManager calls with the position's liquidity before and after each,
-derived from `Unwound`, `Redeposited` and the PoolManager's two `ModifyLiquidity` events.
+The six steps are reported as they happen rather than as a spinner. The transaction hash is the only thing
+carried forward: everything shown about the fill afterwards is decoded from the receipt, the `Swapped`
+amounts, then the two PositionManager calls with the position's liquidity before and after each, derived from
+`Unwound`, `Redeposited` and the PoolManager's two `ModifyLiquidity` events.
 
-The **dry** box next to the button runs `yarn fill --dry`, which simulates against live state and broadcasts
-nothing. Useful to rehearse the demo without spending a strategy.
+The **dry** box next to the button does everything except sign: it quotes, calls both Uniswap endpoints,
+encodes the traits and simulates `swap()` against live state through `eth_call`. Useful to rehearse the demo
+without spending a strategy, and it is also how a fill that cannot settle explains itself before a nonce is
+spent.
 
-When no solver answers, `runFill` throws `FillNotWiredError`, the chip in the action bar reads `solver down`,
-and the card names the URL it tried and the command that starts one. It never pretends a transaction happened.
+## Mint and Approve
+
+The connected wallet is the taker, so it needs the input token and an allowance. Both are one button away:
+
+- **Mint** calls `TestERC20.mint`, which is public on the demo pair on purpose, and sends 10 000 tokens to the
+  connected wallet;
+- **Approve the router** approves the router and not Aqua. `useTransferFromAndAquaPush` is set in the taker
+  traits, so the router pulls `tokenIn` from the taker and pushes it into Aqua on the taker's behalf. An
+  allowance to Aqua would leave the swap reverting inside the push with an ERC20 error naming neither
+  contract.
+
+Both show their transaction, and the taker's balance and allowance are read back from the chain next to them.
+That is what makes the demo self serve: a judge can fill against this maker from their own wallet, and the
+maker's four on-chain guards are what make an unknown taker harmless.
 
 ## SLAC
 
@@ -115,11 +133,12 @@ frontend and the solver share one file. Only `VITE_` prefixed variables reach th
 - `SEPOLIA_RPC_URL`, proxied at `/api/rpc` so a private endpoint stays out of the bundle. Without it the app
   falls back to public Sepolia endpoints.
 - `VITE_SEPOLIA_RPC_URL`, an endpoint the browser may call directly.
-- `SOLVER_URL`, where the dev server proxies `/api/solver`. Defaults to `http://127.0.0.1:8787`.
-- `VITE_SOLVER_URL`, a solver the browser posts to directly instead, bypassing the proxy.
+
+Nothing else. There is no solver to point at.
 
 ## Polling
 
-Chain state every 5 seconds, the log scan every 60, the solver health probe every 20. `POST /lp/pool_info` is
-never on a timer: it goes out on **Refresh state**, at most once every 15 seconds, because the Uniswap key
-allows six requests a second and a demo should not spend that on a render loop.
+Chain state every 5 seconds, the log scan every 60, and the taker's balance and allowance on the same tick as
+the state. `POST /lp/pool_info` is never on a timer: it goes out on **Refresh state**, at most once every 15
+seconds, because the Uniswap key allows six requests a second and a demo should not spend that on a render
+loop. The two calls a fill makes are the only other API traffic, and they go out once per press.
