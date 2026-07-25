@@ -38,8 +38,14 @@ export const env = {
   get apiKey() {
     return required('UNISWAP_API_KEY')
   },
+  /**
+   * `||` and not `??` on purpose. `.env.example` ships `SEPOLIA_RPC_URL=` with nothing after it, so the
+   * variable is present and empty rather than absent. viem hides that by falling back to the chain default
+   * when handed an empty string, and `forge script --rpc-url ''` fails with a transport error naming the
+   * working directory, which is a long way from the cause.
+   */
   get rpcUrl() {
-    return process.env.SEPOLIA_RPC_URL ?? 'https://ethereum-sepolia-rpc.publicnode.com'
+    return process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com'
   },
   get privateKey() {
     return required('DEPLOYER_PRIVATE_KEY')
