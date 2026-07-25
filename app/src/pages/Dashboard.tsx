@@ -8,13 +8,12 @@ import { vaultAbi } from '../lib/abi'
 import { CHAIN, publicClient, walletClientFor } from '../lib/client'
 import type { AppConfig } from '../lib/config'
 import {
-  fillWiring,
-  probeSolver,
+  approveRouter,
+  mintTo,
+  readTakerPosition,
   runFill,
-  solverUrl,
   type FillResult,
   type FillStep,
-  type SolverProbe,
 } from '../lib/fill'
 import {
   addressUrl,
@@ -35,6 +34,9 @@ import { ratio, slacOf, tokens as wholeTokens, type SlacLeg, type SlacNumerator 
 import { readSnapshot, tokenOf, type Snapshot } from '../lib/state'
 import { claimFees, decrease, findTransactionRequest, poolInfo, type TransactionRequest } from '../lib/uniswap'
 
+/** What Mint test tokens hands the connected wallet. Ten clips of the default size, so a demo does not repeat. */
+const MINT_AMOUNT = 10_000n * 10n ** 18n
+
 type Action<T> =
   | { status: 'idle' }
   | { status: 'pending' }
@@ -48,8 +50,6 @@ const notRead: Result<never> = { ok: false, reason: 'not read yet' }
 const STATE_POLL_MS = 5_000
 /** Logs only move when a fill or a ship lands, so they are read on a slower loop. */
 const HISTORY_POLL_MS = 60_000
-/** Local and cheap, but there is no reason to ask more often than a person can press a button. */
-const SOLVER_POLL_MS = 20_000
 /** The Uniswap key allows six requests a second. One pool_info per manual refresh, never on a render. */
 const POOL_INFO_MIN_GAP_MS = 15_000
 
@@ -310,7 +310,6 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
 
   const [history, setHistory] = useState<History | null>(null)
   const [historyError, setHistoryError] = useState<string | null>(null)
-  const [probe, setProbe] = useState<SolverProbe | null>(null)
 
   const [amountInput, setAmountInput] = useState('1000')
   const [aToB, setAToB] = useState(true)
@@ -324,12 +323,17 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
   const [execution, setExecution] = useState<Action<{ hash: Hex }>>(idle)
   const [apiPool, setApiPool] = useState<Record<string, string | number> | null>(null)
 
+  // The connected wallet is the taker now, so what it holds and what it has approved is part of the state
+  // this page reads, and the two buttons that fix either are next to the fill.
+  const [taker, setTaker] = useState<{ balance: bigint; allowance: bigint } | null>(null)
+  const [mint, setMint] = useState<Action<{ hash: Hex }>>(idle)
+  const [approval, setApproval] = useState<Action<{ hash: Hex }>>(idle)
+
   const [receiptHash, setReceiptHash] = useState<Hex | null>(null)
   const [ranHere, setRanHere] = useState(false)
   const [receipt, setReceipt] = useState<Action<FillReceipt>>(idle)
 
   const chainId = config?.deployment.chainId ?? config?.chain.chainId ?? CHAIN.id
-  const wiring = useMemo(() => fillWiring(probe), [probe])
 
   const historyRef = useRef<History | null>(null)
   const poolInfoAt = useRef(0)
@@ -407,20 +411,6 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
     }
   }, [live])
 
-  useEffect(() => {
-    let cancelled = false
-    const ask = () => {
-      void probeSolver().then((result) => {
-        if (!cancelled) setProbe(result)
-      })
-    }
-    ask()
-    const timer = setInterval(ask, SOLVER_POLL_MS)
-    return () => {
-      cancelled = true
-      clearInterval(timer)
-    }
-  }, [])
 
   // The last fill the deployment record names, so the panel shows a real transaction before anybody presses
   // anything. A fill run from this page replaces it.
@@ -466,8 +456,10 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
     snapshot && token ? tokenOf(snapshot, token) : { symbol: 'token', decimals: 18 }
   const symbol0 = token0 ? metaOf(token0).symbol : 'token0'
   const symbol1 = token1 ? metaOf(token1).symbol : 'token1'
-  const inMeta = metaOf(aToB ? token0 : token1)
-  const outMeta = metaOf(aToB ? token1 : token0)
+  const tokenIn = aToB ? token0 : token1
+  const tokenOut = aToB ? token1 : token0
+  const inMeta = metaOf(tokenIn)
+  const outMeta = metaOf(tokenOut)
   const inSymbol = inMeta.symbol
   const outSymbol = outMeta.symbol
   const inDecimals = inMeta.decimals
@@ -475,8 +467,27 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
 
   const tokenId = snapshot?.uniswap.tokenId ?? null
   const vaultAddress = config?.deployment.vault ?? null
+  const router = config?.deployment.router ?? null
   const positionManager = config?.deployment.positionManager ?? config?.chain.positionManager ?? null
   const orderResult = config ? orderFrom(config.deployment) : null
+  const takerAddress = (wallet.state?.address ?? null) as Address | null
+
+  /** What the connected wallet holds of the input token, and what it has approved the router for. */
+  const refreshTaker = useCallback(async () => {
+    if (!takerAddress || !tokenIn || !router) {
+      setTaker(null)
+      return
+    }
+    try {
+      setTaker(await readTakerPosition({ taker: takerAddress, token: tokenIn, router }))
+    } catch {
+      setTaker(null)
+    }
+  }, [router, takerAddress, tokenIn])
+
+  useEffect(() => {
+    void refreshTaker()
+  }, [refreshTaker, snapshot?.at])
 
   const isVaultOwner =
     wallet.state && snapshot?.vault.owner.ok
@@ -538,16 +549,78 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
     }
   }, [aToB, amountInput, config, inDecimals, orderResult])
 
+  /**
+   * Everything the fill needs that is not typed into the form, or a sentence saying what is missing.
+   *
+   * Nothing here is hardcoded: the addresses come from `deployments/sepolia.json`, the order comes from the
+   * record the ship script published, and the two risk parameters are read off the vault itself rather than
+   * off the record, so they are the numbers the guards will actually enforce.
+   */
+  const fillInputs = useMemo(():
+    | { ok: true; value: Parameters<typeof runFill>[0] }
+    | { ok: false; reason: string } => {
+    if (!config || !snapshot) return { ok: false, reason: 'the chain state is still loading' }
+    if (!takerAddress) return { ok: false, reason: 'connect a wallet, it is the taker and it signs the swap' }
+    if (wallet.state && wallet.state.chainId !== CHAIN.id) {
+      return { ok: false, reason: `the wallet is on chain ${wallet.state.chainId}, this book lives on Sepolia` }
+    }
+    if (!orderResult) return { ok: false, reason: 'no deployment record yet' }
+    if (!orderResult.ok) return { ok: false, reason: orderResult.reason }
+    if (!router || !vaultAddress || !positionManager) return { ok: false, reason: 'no router, vault or position manager in the record' }
+    if (tokenId === null) return { ok: false, reason: 'no position yet, so there is nothing to unwind' }
+    if (!token0 || !token1) return { ok: false, reason: 'the pool key has not been read yet' }
+    if (!snapshot.vault.unitsPerLiquidityE18.ok) return { ok: false, reason: snapshot.vault.unitsPerLiquidityE18.reason }
+    if (!snapshot.vault.maxUnwindPct.ok) return { ok: false, reason: snapshot.vault.maxUnwindPct.reason }
+
+    return {
+      ok: true,
+      value: {
+        amount: parseUnits(amountInput || '0', inDecimals),
+        isAToB: aToB,
+        taker: takerAddress,
+        order: orderResult.value,
+        orderHash: config.deployment.strategy?.orderHash ?? config.deployment.strategyHash,
+        router,
+        vault: vaultAddress,
+        positionManager,
+        tokenId,
+        token0,
+        token1,
+        unitsPerLiquidityE18: snapshot.vault.unitsPerLiquidityE18.value,
+        maxUnwindPct: snapshot.vault.maxUnwindPct.value,
+        chainId,
+        dry: dryRun,
+      },
+    }
+  }, [
+    aToB,
+    amountInput,
+    chainId,
+    config,
+    dryRun,
+    inDecimals,
+    orderResult,
+    positionManager,
+    router,
+    snapshot,
+    takerAddress,
+    token0,
+    token1,
+    tokenId,
+    vaultAddress,
+    wallet.state,
+  ])
+
   const onFill = useCallback(async () => {
+    if (!fillInputs.ok) {
+      setFill({ status: 'error', message: fillInputs.reason })
+      return
+    }
     setFill({ status: 'pending' })
     setProgress({ steps: [], log: [] })
     try {
       const value = await runFill({
-        amount: parseUnits(amountInput || '0', inDecimals),
-        isExactIn: true,
-        isAToB: aToB,
-        taker: (wallet.state?.address ?? config?.deployment.deployer) as Address | undefined,
-        dry: dryRun,
+        ...fillInputs.value,
         onEvent: (event) => {
           if (event.type === 'step') {
             setProgress((current) => ({
@@ -567,10 +640,38 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
       }
       void refresh()
       void scanHistory()
+      void refreshTaker()
     } catch (error) {
       setFill({ status: 'error', message: reason(error) })
     }
-  }, [aToB, amountInput, config, dryRun, inDecimals, refresh, scanHistory, wallet.state])
+  }, [fillInputs, refresh, refreshTaker, scanHistory])
+
+  /** `TestERC20.mint` is public, which is what lets a judge drive the demo without asking anyone for tokens. */
+  const onMint = useCallback(async () => {
+    if (!takerAddress || !tokenIn) return
+    setMint({ status: 'pending' })
+    try {
+      const hash = await mintTo({ token: tokenIn, taker: takerAddress, amount: MINT_AMOUNT })
+      setMint({ status: 'ok', value: { hash } })
+      await publicClient.waitForTransactionReceipt({ hash })
+      void refreshTaker()
+    } catch (error) {
+      setMint({ status: 'error', message: reason(error) })
+    }
+  }, [refreshTaker, takerAddress, tokenIn])
+
+  const onApprove = useCallback(async () => {
+    if (!takerAddress || !tokenIn || !router) return
+    setApproval({ status: 'pending' })
+    try {
+      const hash = await approveRouter({ token: tokenIn, taker: takerAddress, router })
+      setApproval({ status: 'ok', value: { hash } })
+      await publicClient.waitForTransactionReceipt({ hash })
+      void refreshTaker()
+    } catch (error) {
+      setApproval({ status: 'error', message: reason(error) })
+    }
+  }, [refreshTaker, router, takerAddress, tokenIn])
 
   const onClaimFees = useCallback(async () => {
     if (!vaultAddress) return
@@ -716,8 +817,12 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
         <button
           className="btn primary"
           onClick={() => void onFill()}
-          disabled={fill.status === 'pending'}
-          title={wiring.detail}
+          disabled={fill.status === 'pending' || !fillInputs.ok}
+          title={
+            fillInputs.ok
+              ? 'quote, size, /lp/decrease, /lp/increase, taker traits, swap(). All of it in this tab, signed by the connected wallet'
+              : fillInputs.reason
+          }
         >
           {fill.status === 'pending' ? 'filling' : dryRun ? 'Run a fill, dry' : 'Run a fill'}
         </button>
@@ -725,6 +830,30 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
           <input type="checkbox" checked={dryRun} onChange={(event) => setDryRun(event.target.checked)} />
           dry
         </label>
+        <button
+          className="btn"
+          onClick={() => void onMint()}
+          disabled={mint.status === 'pending' || !takerAddress || !tokenIn}
+          title={
+            takerAddress
+              ? `TestERC20.mint is public, this mints ${fmtAmount(MINT_AMOUNT, inDecimals, 0)} ${inSymbol} to your wallet`
+              : 'connect a wallet first, the tokens are minted to it'
+          }
+        >
+          {mint.status === 'pending' ? 'minting' : `Mint ${inSymbol}`}
+        </button>
+        <button
+          className="btn"
+          onClick={() => void onApprove()}
+          disabled={approval.status === 'pending' || !takerAddress || !tokenIn || !router}
+          title={
+            takerAddress
+              ? 'approves the router, not Aqua: useTransferFromAndAquaPush makes the router push on your behalf'
+              : 'connect a wallet first'
+          }
+        >
+          {approval.status === 'pending' ? 'approving' : 'Approve the router'}
+        </button>
         <button className="btn" onClick={() => void onClaimFees()} disabled={claim.status === 'pending'}>
           Claim fees
         </button>
@@ -734,8 +863,11 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
           <input type="checkbox" checked={live} onChange={(event) => setLive(event.target.checked)} />
           auto refresh, 5 s
         </label>
-        <span className={wiring.wired ? 'chip' : 'chip warn'} title={wiring.detail}>
-          <span className="led" /> solver {wiring.wired ? 'up' : 'down'}
+        <span
+          className={fillInputs.ok ? 'chip' : 'chip warn'}
+          title={fillInputs.ok ? 'the fill runs here, signed by this wallet' : fillInputs.reason}
+        >
+          <span className="led" /> taker {takerAddress ? short(takerAddress, 6, 4) : 'not connected'}
         </span>
         <span className="chip" title="block the last read was answered at">
           <span className="led" />
@@ -878,8 +1010,8 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
             ) : null}
             {fill.status === 'pending' ? (
               <div className="muted">
-                the solver is running solver/src/fill.ts, which is what yarn fill runs: a quote, two Uniswap API
-                calls, a Foundry simulation, then the broadcast.
+                running in this tab: a quote through a staticcall, two Uniswap API calls, the taker traits built
+                by solver/src/takerTraits.ts, then swap() signed by the connected wallet.
               </div>
             ) : null}
             {fill.status === 'error' ? (
@@ -903,32 +1035,35 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
                 </dd>
                 <dt>quoted</dt>
                 <dd>
-                  {fill.value.amountIn === null ? 'unavailable' : fmtAmount(fill.value.amountIn, inDecimals, 6)}{' '}
-                  {inSymbol} in,{' '}
-                  {fill.value.amountOut === null ? 'unavailable' : fmtAmount(fill.value.amountOut, outDecimals, 6)}{' '}
-                  {outSymbol} out
+                  {fmtAmount(fill.value.amountIn, inDecimals, 6)} {inSymbol} in,{' '}
+                  {fmtAmount(fill.value.amountOut, outDecimals, 6)} {outSymbol} out
                 </dd>
                 <dt>unwind</dt>
                 <dd>
                   {fill.value.unwindPercent} percent of the position
                   <span className="unit">rounded up, liquidityPercentageToDecrease is an integer</span>
                 </dd>
-                <dt>sent from</dt>
+                <dt>signed by</dt>
                 <dd>
-                  {fill.value.taker ? (
-                    <Addr value={fill.value.taker} length={10} />
-                  ) : (
-                    <span className="faint">the solver key</span>
-                  )}
-                  <span className="unit">the solver signs with the key it holds, not with the browser wallet</span>
+                  <Addr value={fill.value.taker} length={10} />
+                  <span className="unit">
+                    the connected wallet is the taker, and the router pulls the input from it
+                  </span>
                 </dd>
-                <dt>command</dt>
-                <dd className="faint">{fill.value.command ?? 'yarn fill'}</dd>
+                <dt>takerTraits</dt>
+                <dd>
+                  {(fill.value.takerTraitsAndData.length - 2) / 2} bytes
+                  <span className="unit">
+                    22 of header, then the threshold, the /lp/increase payload and the /lp/decrease payload.
+                    Built by solver/src/takerTraits.ts, proved against TakerTraitsLib.build in
+                    contracts/test/TakerTraits.t.sol
+                  </span>
+                </dd>
               </dl>
             ) : null}
             {progress.log.length ? (
               <details style={{ marginTop: 10 }}>
-                <summary className="faint">solver output, {progress.log.length} lines</summary>
+                <summary className="faint">what the fill worked out, {progress.log.length} lines</summary>
                 <pre className="json">{progress.log.join('\n')}</pre>
               </details>
             ) : null}
@@ -1374,30 +1509,72 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
               </div>
             )}
 
-            <div className="subhead">fill orchestration</div>
-            <Metric label="Run a fill" note={wiring.wired ? solverUrl() : 'no solver answering'}>
-              {wiring.wired ? (
-                <span className="chip">
-                  <span className="led" /> wired
-                </span>
+            <div className="subhead">
+              the taker
+              <span className="note">
+                the connected wallet, which signs the swap. There is no process between this page and the chain
+              </span>
+            </div>
+            <Metric label="address" note="whoever presses the button">
+              {takerAddress ? (
+                <Addr value={takerAddress} />
               ) : (
                 <>
-                  <span className="unavailable">not wired</span>
-                  <span className="why">{wiring.detail}</span>
+                  <span className="unavailable">not connected</span>
+                  <span className="why">connect a wallet in the header, it is the taker of the fill</span>
                 </>
               )}
             </Metric>
-            {probe?.ok && probe.busy ? (
-              <Metric label="solver">
-                <span className="chip warn">
-                  <span className="led" /> a fill is already running
-                </span>
+            <Metric label={`balance, ${inSymbol}`} note="what the router will pull from you">
+              {taker ? (
+                <span className="num">{fmtAmount(taker.balance, inDecimals, 4)}</span>
+              ) : (
+                <span className="unavailable">not read</span>
+              )}
+            </Metric>
+            <Metric label="allowance to the router" note="not to Aqua, the router pushes on your behalf">
+              {taker ? (
+                taker.allowance > 2n ** 200n ? (
+                  <span className="num">
+                    unlimited <Unit>approved</Unit>
+                  </span>
+                ) : (
+                  <span className="num">{fmtAmount(taker.allowance, inDecimals, 4)}</span>
+                )
+              ) : (
+                <span className="unavailable">not read</span>
+              )}
+            </Metric>
+            {mint.status !== 'idle' ? (
+              <Metric label="mint" note="TestERC20.mint, public on purpose">
+                {mint.status === 'ok' ? (
+                  <a href={txUrl(mint.value.hash)} target="_blank" rel="noreferrer" className="mono">
+                    {short(mint.value.hash, 10, 8)}
+                  </a>
+                ) : mint.status === 'pending' ? (
+                  <span className="faint">waiting on the wallet</span>
+                ) : (
+                  <span className="unavailable">{mint.message}</span>
+                )}
               </Metric>
             ) : null}
-            {config?.deployment.router ? (
+            {approval.status !== 'idle' ? (
+              <Metric label="approve" note="ERC20 approve to the router">
+                {approval.status === 'ok' ? (
+                  <a href={txUrl(approval.value.hash)} target="_blank" rel="noreferrer" className="mono">
+                    {short(approval.value.hash, 10, 8)}
+                  </a>
+                ) : approval.status === 'pending' ? (
+                  <span className="faint">waiting on the wallet</span>
+                ) : (
+                  <span className="unavailable">{approval.message}</span>
+                )}
+              </Metric>
+            ) : null}
+            {router ? (
               <Metric label="router">
-                <a href={addressUrl(config.deployment.router)} target="_blank" rel="noreferrer" className="mono">
-                  {short(config.deployment.router, 10, 6)}
+                <a href={addressUrl(router)} target="_blank" rel="noreferrer" className="mono">
+                  {short(router, 10, 6)}
                 </a>
               </Metric>
             ) : null}

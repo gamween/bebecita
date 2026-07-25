@@ -11,22 +11,28 @@ import { TakerTraitsLib } from "@1inch/swap-vm/src/libs/TakerTraits.sol";
 /// @title Fill
 /// @notice Sends one fill against the Bebecita book, with the two Uniswap payloads carried in the taker traits.
 ///
-/// @dev Why the traits are built here and not in TypeScript. `TakerTraits` is a 22 byte header of ten 16 bit
-///      slice indexes followed by a flag word, and every index is a running sum of the lengths of the slices
-///      before it. Reproducing that arithmetic by hand in a second language means owning a second copy of it,
-///      and the failure mode is silent: a header off by one byte does not fail to decode, it decodes a
-///      different slice, the VM prices against garbage and the revert that surfaces is
-///      `TakerTraitsAmountOutMustBeGreaterThanZero`, which points at the amount rather than at the header.
-///      `TakerTraitsLib.build` is the sponsor's own builder and it is `internal pure`, so a script can call it
-///      and a TypeScript process cannot. This script is therefore the seam: the solver sizes the fill and
-///      fetches the calldata, this reads it back and does the encoding where the library lives.
+/// @dev This script is the reference implementation, not the fill path. Fills are sent from the browser, by
+///      the connected wallet, and their taker traits are encoded by `solver/src/takerTraits.ts`. What keeps
+///      that port honest is `contracts/test/TakerTraits.t.sol`, which calls `TakerTraitsLib.build` with the
+///      same arguments `_buildTakerTraits` uses below and asserts byte equality against the TypeScript
+///      output. So this file is the thing being diffed against, and it stays for that reason.
 ///
-/// @dev The input is `deployments/fill.local.json`, written by `solver/src/fill.ts` immediately before this
-///      runs. It holds calldata the Uniswap API built against a block that has already passed, so it is
-///      deliberately short lived and gitignored.
+/// @dev The encoding is worth being paranoid about. `TakerTraits` is a 22 byte header of ten 16 bit slice
+///      indexes followed by a flag word, and every index is a running sum of the lengths of the slices before
+///      it. A header off by one byte does not fail to decode, it decodes a different slice: the VM prices
+///      against garbage and the revert that surfaces is `TakerTraitsAmountOutMustBeGreaterThanZero`, which
+///      points at the amount rather than at the header. `TakerTraitsLib.build` is `internal pure`, so it can
+///      only run inside a contract, which is exactly why it had to be ported rather than called.
 ///
-/// @dev Usage, normally through `yarn fill`:
-///      forge script contracts/script/Fill.s.sol --rpc-url sepolia --broadcast --skip test
+/// @dev The input is `deployments/fill.local.json`, written by `solver/src/fill.ts` on every run. It holds
+///      calldata the Uniswap API built against a block that has already passed, so it is deliberately short
+///      lived and gitignored. Running this script replays that fill through Foundry, which is the way to get
+///      a call trace out of a fill the browser sent, since public Sepolia endpoints answer
+///      `debug_traceTransaction` with a 403.
+///
+/// @dev Usage:
+///      yarn fill --dry                                                    # writes the request, sends nothing
+///      forge script contracts/script/Fill.s.sol --rpc-url sepolia --skip test -vvvv
 contract Fill is Script {
     string internal constant REQUEST = "deployments/fill.local.json";
 
@@ -84,6 +90,9 @@ contract Fill is Script {
     }
 
     /// @notice `TakerTraitsLib.build` for the one shape this project uses.
+    ///
+    /// @dev `buildFillTakerTraits` in `solver/src/takerTraits.ts` is this function in TypeScript, and
+    ///      `contracts/test/TakerTraits.t.sol` asserts the two produce the same bytes.
     ///
     /// @dev Three flags carry the whole design.
     ///

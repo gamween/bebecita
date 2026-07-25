@@ -1,25 +1,21 @@
-import { concatHex, numberToHex, type Address, type Hex } from 'viem'
+import type { Address, Hex } from 'viem'
 
+import { buildQuoteTakerTraits } from '@solver/takerTraits'
 import { routerAbi } from './abi'
 import { publicClient } from './client'
 import { orderRecord, type DeploymentRecord } from './config'
 import { ok, unavailable, type Result } from './format'
 
 /**
- * Taker traits, built the way `TakerTraitsLib.build` builds them.
+ * Taker traits come from `solver/src/takerTraits.ts`, the port of `TakerTraitsLib.build` that
+ * `contracts/test/TakerTraits.t.sol` proves byte for byte against the sponsor's own library.
  *
- * The header is 22 bytes: a `uint160` of ten 16 bit slice indexes, then a `uint16` of flags. A quote needs no
- * threshold, no recipient, no deadline, no hook data and no instruction arguments, so every index is zero and
- * the header collapses to twenty zero bytes followed by the flags. A real fill fills those slices with the
- * `/lp/decrease` and `/lp/increase` calldata, which is the solver's job.
+ * A quote is its degenerate case: no threshold, no recipient, no deadline, no hook data and no instruction
+ * arguments, so every slice index is zero and the header collapses to twenty zero bytes followed by the flag
+ * word. A fill fills those slices with the `/lp/decrease` and `/lp/increase` calldata, and the same function
+ * builds that too, in this tab, which is why there is no longer a process between the button and the chain.
  */
-export const IS_EXACT_IN_BIT_FLAG = 0x0001
-export const IS_A_TO_B_BIT_FLAG = 0x0080
-
-export function buildQuoteTakerTraits(options: { isExactIn: boolean; isAToB: boolean }): Hex {
-  const flags = (options.isExactIn ? IS_EXACT_IN_BIT_FLAG : 0) | (options.isAToB ? IS_A_TO_B_BIT_FLAG : 0)
-  return concatHex([numberToHex(0n, { size: 20 }), numberToHex(flags, { size: 2 })])
-}
+export { buildQuoteTakerTraits }
 
 export interface Order {
   maker: Address

@@ -126,6 +126,7 @@ export function decrease(params: {
   token0: string
   token1: string
   percent: number
+  slippageTolerance?: number
 }) {
   const percent = Math.min(100, Math.max(1, Math.ceil(params.percent)))
   return post<Record<string, unknown>>('POST /lp/decrease', '/lp/decrease', {
@@ -138,9 +139,42 @@ export function decrease(params: {
     token0Address: params.token0,
     token1Address: params.token1,
     liquidityPercentageToDecrease: percent,
-    slippageTolerance: 5,
+    // The same tolerance the command line fill uses, so the payload this button previews is the payload a
+    // fill would actually place in the taker traits.
+    slippageTolerance: params.slippageTolerance ?? 0.5,
     simulateTransaction: false,
     withdrawAsWeth: false,
+  })
+}
+
+/**
+ * The redeposit. Its calldata goes into the `postTransferInHookData` slice and is executed by
+ * `BebecitaVault.postTransferIn`, after the taker has been paid and after the taker's input has landed, which
+ * is the whole reason `isFirstTransferFromTaker` stays false.
+ *
+ * One side only: `independentToken` names the token and the amount, and the API computes the other leg from
+ * live pool state. There is no two sided form of this request.
+ */
+export function increase(params: {
+  chainId: number
+  protocol?: Protocol
+  walletAddress: string
+  tokenId: string
+  token0: string
+  token1: string
+  independentToken: string
+  independentAmount: string
+}) {
+  return post<Record<string, unknown>>('POST /lp/increase', '/lp/increase', {
+    walletAddress: params.walletAddress,
+    chainId: params.chainId,
+    protocol: params.protocol ?? 'V4',
+    nftTokenId: params.tokenId,
+    token0Address: params.token0,
+    token1Address: params.token1,
+    independentToken: { tokenAddress: params.independentToken, amount: params.independentAmount },
+    slippageTolerance: 5,
+    simulateTransaction: false,
   })
 }
 

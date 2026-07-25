@@ -30,6 +30,7 @@ export const routerAbi = parseAbi([
   'function OPCODE_UNWIND_PRICED_BALANCE_OUT() view returns (uint256)',
   'function hash((address maker, uint256 traits, bytes data) order) view returns (bytes32)',
   'function quote((address maker, uint256 traits, bytes data) order, uint256 amount, bytes takerTraitsAndData) view returns (uint256 amountIn, uint256 amountOut, bytes32 orderHash)',
+  'function swap((address maker, uint256 traits, bytes data) order, uint256 amount, bytes takerTraitsAndData) payable returns (uint256 amountIn, uint256 amountOut, bytes32 orderHash)',
 ])
 
 export const aquaAbi = parseAbi([
@@ -69,8 +70,17 @@ export const stateViewAbi = parseAbi([
   'function getLiquidity(bytes32 poolId) view returns (uint128 liquidity)',
 ])
 
+/**
+ * The demo pair is `TestERC20`, whose `mint` is public on purpose: the taker is now whoever presses the
+ * button, so a judge has to be able to fund and approve their own wallet without asking anyone for tokens.
+ * The allowance goes to the router, not to Aqua, because `useTransferFromAndAquaPush` makes the router pull
+ * the input and push it into Aqua on the taker's behalf.
+ */
 export const erc20Abi = parseAbi([
   'function symbol() view returns (string)',
   'function decimals() view returns (uint8)',
   'function balanceOf(address account) view returns (uint256)',
+  'function allowance(address owner, address spender) view returns (uint256)',
+  'function approve(address spender, uint256 amount) returns (bool)',
+  'function mint(address to, uint256 amount)',
 ])
