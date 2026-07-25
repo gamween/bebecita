@@ -312,6 +312,9 @@ async function main() {
   // The API returns transactions the vault cannot broadcast, because a contract has no key. It can execute
   // them, which is the whole reason `generatePermitAsTransaction` matters here: each returned call is decoded
   // and re-issued through the vault's own owner-only entry point for that exact selector.
+  //
+  // An empty list is the good outcome and not a skipped step: the redeploy already granted both halves, so
+  // this is the API confirming that a contract owned position is fully approved to add liquidity.
   const vaultApprovals = await uniswap.checkApproval({
     walletAddress: vault,
     token0,
@@ -322,6 +325,8 @@ async function main() {
   })
 
   info('transactions returned', vaultApprovals.transactions.length)
+  if (vaultApprovals.transactions.length === 0) info('the API considers the vault fully approved')
+
   for (const item of vaultApprovals.transactions) {
     const target = getAddress(item.transaction.to)
     const data = item.transaction.data as Hex
