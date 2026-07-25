@@ -50,7 +50,7 @@ async function main() {
     failures++
   }
 
-  // 3. The API key is live.
+  // 3. The API key is live on the trade host.
   const uniswap = new UniswapClient({ apiKey: env.apiKey, chainId: SEPOLIA.chainId, protocol: 'V4' })
   try {
     await uniswap.supportedChains()
@@ -60,7 +60,22 @@ async function main() {
     failures++
   }
 
-  // 4. The deployer can pay for gas.
+  // 4. And on the LP host, which is a different origin and the one that actually matters here.
+  //    The seven /lp/* paths carry a per-path server override to liquidity.api.uniswap.org.
+  try {
+    await uniswap.poolInfo({
+      tokenA: '0x0000000000000000000000000000000000000000',
+      tokenB: SEPOLIA.weth,
+      fee: 3000,
+      tickSpacing: 60,
+    })
+    ok('LP host reachable and authenticated', 'liquidity.api.uniswap.org')
+  } catch (error) {
+    bad('LP host rejected the call', String(error).slice(0, 200))
+    failures++
+  }
+
+  // 5. The deployer can pay for gas.
   try {
     const { privateKeyToAccount } = await import('viem/accounts')
     const account = privateKeyToAccount(env.privateKey as `0x${string}`)
