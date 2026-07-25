@@ -10,6 +10,7 @@ import { ISwapVM } from "@1inch/swap-vm/src/interfaces/ISwapVM.sol";
 import { MakerTraitsLib } from "@1inch/swap-vm/src/libs/MakerTraits.sol";
 import { TakerTraitsLib } from "@1inch/swap-vm/src/libs/TakerTraits.sol";
 import { Opcode } from "@1inch/swap-vm/src/libs/OpcodeList.sol";
+import { XYCConcentrateArgsBuilder } from "@1inch/swap-vm/src/instructions/XYCConcentrate.sol";
 
 import { BebecitaRouter } from "../src/routers/BebecitaRouter.sol";
 import { BebecitaVault } from "../src/vault/BebecitaVault.sol";
@@ -27,6 +28,24 @@ contract BebecitaTest is Test {
     uint8 internal constant MAX_UNWIND_PCT = 50;
     uint16 internal constant HAIRCUT_BPS = 500;
     uint128 internal constant UNITS_PER_LIQUIDITY = 1e18;
+
+    /// @notice The bounds the live book ships, in the instruction's 1e18 fixed point, `sqrt(tokenGt/tokenLt)`.
+    /// @dev The position funding the book is full range, ticks -887220 to 887220, and full range does not
+    ///      survive this fixed point: `sqrt(1.0001^-887220)` is 5.4e-20, which truncates to zero, and
+    ///      `XYCConcentrateArgsBuilder.build2D` rejects a zero lower bound. So the range is clamped to the
+    ///      widest window the format carries, a factor of 1e9 on the sqrt price either side of spot, which is
+    ///      a price window of 1e18 either way and ticks -414486 to 414486. `solver/src/aqua.ts` derives the
+    ///      same two numbers from `POST /lp/pool_info` and the position's ticks, and documents the choice.
+    ///      At this width the virtual reserves add about a billionth of the real ones, so the curve is
+    ///      constant product to nine significant digits and the clamp is what changes, not the price.
+    uint256 internal constant SQRT_PRICE_MIN = 1e9;
+    uint256 internal constant SQRT_PRICE_MAX = 1e27;
+
+    /// @notice The same program with the range the maker would compile in after re-ranging the position.
+    /// @dev Prices 0.25 to 4. Nothing about the instruction changes, only its two arguments, which is the
+    ///      point: the book's curve is the range of the position backing it.
+    uint256 internal constant NARROW_SQRT_PRICE_MIN = 0.5e18;
+    uint256 internal constant NARROW_SQRT_PRICE_MAX = 2e18;
 
     Aqua internal aqua;
     BebecitaRouter internal router;
@@ -157,7 +176,8 @@ contract BebecitaTest is Test {
     }
 
     /// @notice Shipping the input side near the reachable figure is what makes the book quote a readable price.
-    /// @dev `XYCSwap` is constant product, and the instruction lowers `balanceOut` only, so the quote is
+    /// @dev At the shipped bounds the concentrated curve is constant product to nine significant digits, and
+    ///      the instruction lowers `balanceOut` only, so the quote is
     ///      roughly `balanceOut / balanceIn`. Ship both sides generously and the book quotes a fortieth of
     ///      parity, which reads as broken. Ship the input side just above what the position can release and
     ///      the price comes back, while the output side stays generous so that running without the
@@ -195,6 +215,125 @@ contract BebecitaTest is Test {
         vault.ship(address(router), abi.encode(bare), tokens, amounts);
         (, uint256 unclamped,) = ISwapVM(address(router)).quote(bare, amountIn, takerData);
         assertGt(unclamped, clamped * 10, "without the instruction the quote must overstate by an order of magnitude");
+    }
+
+    // ---------------------------------------------------------------------
+    // The curve, opcode 0x51
+    // ---------------------------------------------------------------------
+
+    /// @notice The curve opcode is the sponsor's, dispatched by their table, with no edit to ours.
+    /// @dev `AquaOpcodes._runOpcode` already routes `Opcode.XYCConcentrateSwap` to
+    ///      `XYCConcentrate._xycConcentrateGrowLiquidity2D`, and `BebecitaOpcodes` overrides only `0x92` and
+    ///      the three `Controls` that Aqua never wired. Nothing in this project touches the opcode table for
+    ///      the curve, and the quote below reaching a number is what proves the inherited dispatch works.
+    function test_ConcentrateCurveComesFromTheSponsorsTableUntouched() public {
+        assertEq(uint256(Opcode.XYCConcentrateSwap), 0x51, "0x51 moved in the opcode table");
+        assertTrue(router.OPCODE_UNWIND_PRICED_BALANCE_OUT() != 0x51, "our instruction must not shadow it");
+
+        ISwapVM.Order memory order = _buildOrder(true);
+        _ship(order);
+        (, uint256 quoted,) = ISwapVM(address(router)).quote(order, 100 ether, _buildTakerData("", ""));
+        assertGt(quoted, 0, "0x51 did not price");
+    }
+
+    /// @notice The program is `[0x92 unwind][0x51 concentrate][0x02 salt]`, byte for byte.
+    /// @dev The order of the first two is forced from both ends. `0x92` requires both amount registers to be
+    ///      zero, so it cannot follow a curve, and `0x51` is terminal and reads `balanceOut` after the clamp.
+    ///      `solver/src/aqua.ts` emits this same layout, and `yarn aqua` proves it against `router.hash`
+    ///      before spending gas.
+    function test_ProgramIsUnwindThenConcentrateThenSalt() public view {
+        bytes memory data = _buildOrder(true).data;
+
+        // The program starts after the two token addresses, which is where all four slice indexes point.
+        uint256 pc = 40;
+        assertEq(uint8(data[pc]), 0x92, "first opcode is not the unwind");
+        assertEq(uint8(data[pc + 1]), 71, "unwind args are 20 + 32 + 2 + 1 + 16");
+
+        pc += 2 + 71;
+        assertEq(uint8(data[pc]), 0x51, "the curve is not XYCConcentrateSwap");
+        assertEq(uint8(data[pc + 1]), 64, "concentrate args are two uint256 in 1e18 fixed point");
+
+        pc += 2 + 64;
+        assertEq(uint8(data[pc]), uint8(uint256(Opcode.Salt)), "the salt is not last");
+        assertEq(data.length, pc + 3, "the program carries something after the salt");
+    }
+
+    /// @notice A fill larger than the reachable collateral degrades into an exact partial instead of reverting.
+    ///
+    /// @dev This is the whole reason for moving off `0x50`, and both halves are asserted here.
+    ///
+    ///      `XYCSwap` never clamps its own output. In exact-out it computes
+    ///      `amountIn = ceilDiv(amountOut * balanceIn, balanceOut - amountOut)`, so once instruction `0x92`
+    ///      has lowered `balanceOut` to what the position can actually release, any taker asking for more than
+    ///      that gets an arithmetic panic out of the VM, with nothing in the revert data naming the cause.
+    ///
+    ///      `XYCConcentrate` clamps on `balanceOut` and re-solves the other side for the clamped amount, in
+    ///      both directions, since the partial fill work merged into `swap-vm` main. The taker is paid exactly
+    ///      the reachable collateral and charged exactly what that costs. `TakerTraitsLib.validate` sanctions
+    ///      it: on exact-out it requires `takerAmount >= amountOut`, never equality, so a partial is a legal
+    ///      fill rather than a tolerated accident.
+    function test_ExactOut_AboveReachableCollateral_IsAnExactPartialInsteadOfARevert() public {
+        uint256 reachable = vault.reachableFromPosition();
+        uint256 ask = reachable * 2;
+        bytes memory takerData = _buildTakerData("", "", false);
+
+        ISwapVM.Order memory onXycSwap = _buildXycSwapOrder(true, 0x03);
+        _ship(onXycSwap);
+        vm.expectRevert();
+        ISwapVM(address(router)).quote(onXycSwap, ask, takerData);
+
+        ISwapVM.Order memory onConcentrate = _buildOrder(true);
+        _ship(onConcentrate);
+        (uint256 amountIn, uint256 amountOut,) = ISwapVM(address(router)).quote(onConcentrate, ask, takerData);
+
+        assertEq(amountOut, reachable, "the partial must be exactly the reachable collateral, not an estimate");
+        assertLt(amountOut, ask, "a partial that filled the whole ask is not a partial");
+        assertGt(amountIn, 0, "an exact partial still has to be paid for");
+    }
+
+    /// @notice On a real range, the clamp also re-solves the input, so the taker pays only for what it gets.
+    ///
+    /// @dev Same program, same instruction, narrower arguments: this is the book after the maker re-ranges the
+    ///      position, and it is where the exact-in half of the clamp becomes reachable. A full range position
+    ///      cannot get there, because a constant product curve never pays out its whole reserve, and saying so
+    ///      is more useful than a test that hides it.
+    ///
+    ///      The taker offers far more than the book can absorb. `0x51` pays the whole reachable collateral and
+    ///      charges the solved input, which is a fraction of the offer. `0x50` charges the entire offer and
+    ///      pays out what the curve happens to give, which is both less collateral and a far worse price.
+    function test_ExactIn_ClampedFill_ReSolvesTheInputAndSettles() public {
+        uint256 reachable = vault.reachableFromPosition();
+        uint256 offered = 3_000 ether;
+        token0.mint(taker, offered);
+
+        bytes memory takerData = _buildTakerData(posm.encodeDecrease(TOKEN_ID, 500 ether, address(vault)), "");
+
+        ISwapVM.Order memory order = _buildConcentrateOrder(true, NARROW_SQRT_PRICE_MIN, NARROW_SQRT_PRICE_MAX, 0x05);
+        _ship(order);
+
+        (uint256 quotedIn, uint256 quotedOut,) = ISwapVM(address(router)).quote(order, offered, takerData);
+        assertEq(quotedOut, reachable, "the clamp must land exactly on the reachable collateral");
+        assertLt(quotedIn, offered, "the clamped fill must re-solve the input below what was offered");
+
+        uint256 paidBefore = token0.balanceOf(taker);
+        uint256 heldBefore = token1.balanceOf(taker);
+
+        vm.prank(taker);
+        (uint256 amountIn, uint256 amountOut,) = ISwapVM(address(router)).swap(order, offered, takerData);
+
+        assertEq(amountIn, quotedIn, "quote and swap diverged on the input");
+        assertEq(amountOut, quotedOut, "quote and swap diverged on the output");
+        assertEq(paidBefore - token0.balanceOf(taker), amountIn, "the taker paid more than the solved input");
+        assertEq(token1.balanceOf(taker) - heldBefore, reachable, "the taker was not paid the whole clamp");
+
+        // The same offer on the curve this project used to ship, for the contrast.
+        ISwapVM.Order memory onXycSwap = _buildXycSwapOrder(true, 0x04);
+        _ship(onXycSwap);
+        (uint256 bareIn, uint256 bareOut,) = ISwapVM(address(router)).quote(onXycSwap, offered, takerData);
+
+        assertEq(bareIn, offered, "0x50 charges the whole offer whatever it can deliver");
+        assertLt(bareOut, reachable, "0x50 leaves reachable collateral unsold");
+        assertGt(amountOut * bareIn, bareOut * amountIn, "the partial must execute at a better price");
     }
 
     // ---------------------------------------------------------------------
@@ -302,9 +441,45 @@ contract BebecitaTest is Test {
     // Helpers
     // ---------------------------------------------------------------------
 
-    /// @dev Builds the Aqua order. The program is either the bare curve, or the curve preceded by 0x92.
+    /// @dev The shipped program: `0x92` then `0x51` parameterised as the live book is, then the salt.
     function _buildOrder(bool withInstruction) internal view returns (ISwapVM.Order memory) {
-        bytes memory program = abi.encodePacked(uint8(uint256(Opcode.XYCSwap)), uint8(0));
+        return _buildConcentrateOrder(
+            withInstruction, SQRT_PRICE_MIN, SQRT_PRICE_MAX, withInstruction ? bytes1(0x01) : bytes1(0x02)
+        );
+    }
+
+    /// @dev The concentrated curve, opcode `0x51`, with arguments built by the sponsor's own builder so the
+    ///      64 byte layout is theirs and not a transcription. `solver/src/aqua.ts` emits the same bytes, and
+    ///      that claim is checked on chain every time `yarn aqua` compares its hash against `router.hash`.
+    function _buildConcentrateOrder(
+        bool withInstruction,
+        uint256 sqrtPriceMin,
+        uint256 sqrtPriceMax,
+        bytes1 salt
+    ) internal view returns (ISwapVM.Order memory) {
+        bytes memory curveArgs = XYCConcentrateArgsBuilder.build2D(sqrtPriceMin, sqrtPriceMax);
+        bytes memory curve = abi.encodePacked(
+            uint8(uint256(Opcode.XYCConcentrateSwap)), uint8(curveArgs.length), curveArgs
+        );
+        return _buildOrderOnCurve(withInstruction, curve, salt);
+    }
+
+    /// @dev The curve this project used to ship, opcode `0x50`, kept as the contrast the new tests measure.
+    function _buildXycSwapOrder(bool withInstruction, bytes1 salt)
+        internal
+        view
+        returns (ISwapVM.Order memory)
+    {
+        return _buildOrderOnCurve(withInstruction, abi.encodePacked(uint8(uint256(Opcode.XYCSwap)), uint8(0)), salt);
+    }
+
+    /// @dev Builds the Aqua order. The program is either the bare curve, or the curve preceded by 0x92.
+    function _buildOrderOnCurve(bool withInstruction, bytes memory curve, bytes1 salt)
+        internal
+        view
+        returns (ISwapVM.Order memory)
+    {
+        bytes memory program = curve;
 
         if (withInstruction) {
             bytes memory args = UnwindPricedBalancesArgsBuilder.build(
@@ -316,9 +491,7 @@ contract BebecitaTest is Test {
         }
 
         // A salt keeps the order hash unique so the same economic strategy can be shipped more than once.
-        program = abi.encodePacked(
-            program, uint8(uint256(Opcode.Salt)), uint8(1), withInstruction ? bytes1(0x01) : bytes1(0x02)
-        );
+        program = abi.encodePacked(program, uint8(uint256(Opcode.Salt)), uint8(1), salt);
 
         return MakerTraitsLib.build(
             MakerTraitsLib.Args({
@@ -368,10 +541,19 @@ contract BebecitaTest is Test {
         view
         returns (bytes memory)
     {
+        return _buildTakerData(unwindPayload, redepositPayload, true);
+    }
+
+    /// @dev The same, with the direction of the quote made explicit. Exact-out is where `0x50` panics.
+    function _buildTakerData(bytes memory unwindPayload, bytes memory redepositPayload, bool isExactIn)
+        internal
+        view
+        returns (bytes memory)
+    {
         return TakerTraitsLib.build(
             TakerTraitsLib.Args({
                 taker: taker,
-                isExactIn: true,
+                isExactIn: isExactIn,
                 shouldUnwrapWeth: false,
                 isStrictThresholdAmount: false,
                 isFirstTransferFromTaker: false,

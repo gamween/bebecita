@@ -15,7 +15,14 @@ import { resolve } from 'node:path'
 
 import { getAddress, keccak256, type Address, type Hex } from 'viem'
 
-import { buildOrder, buildProgram, buildUnwindArgs, encodeOrder, type Order } from './aqua.js'
+import {
+  buildConcentrateArgs,
+  buildOrder,
+  buildProgram,
+  buildUnwindArgs,
+  encodeOrder,
+  type Order,
+} from './aqua.js'
 
 const ROOT = resolve(import.meta.dirname, '../..')
 
@@ -37,10 +44,17 @@ export const FILL_REQUEST_RELATIVE = 'deployments/fill.local.json'
 export interface StrategyRecord {
   orderHash: Hex
   salt: Hex
-  shippedBalance: string
+  /** What the vault shipped into Aqua, asymmetric on purpose. See `shippedAmounts` in `aqua.ts`. */
+  shipped: { token0: string; token1: string }
+  reachableAtShip?: string
   haircutBps: number
   maxUnwindPct: number
   unitsPerLiquidityE18: string
+  /** The two bounds of instruction `0x51`, in 1e18 fixed point. Part of the program bytes. */
+  sqrtPriceMin: string
+  sqrtPriceMax: string
+  /** Where those two came from: the position's ticks and the pool state at ship time. Provenance, not input. */
+  curve?: Record<string, unknown>
   order: { maker: string; traits: string; data: Hex }
   shipTx?: Hex
 }
@@ -78,9 +92,12 @@ export interface StrategyParams {
   haircutBps: number
   maxUnwindPct: number
   unitsPerLiquidityE18: bigint
+  /** Curve bounds of instruction `0x51`, taken from the record rather than recomputed from the ticks. */
+  sqrtPriceMin: bigint
+  sqrtPriceMax: bigint
 }
 
-/** The one place an order is composed, out of the three builders `aqua.ts` exports and nothing else. */
+/** The one place an order is composed, out of the four builders `aqua.ts` exports and nothing else. */
 export function composeOrder(params: StrategyParams): Order {
   return buildOrder({
     maker: params.vault,
@@ -88,6 +105,10 @@ export function composeOrder(params: StrategyParams): Order {
     tokenB: params.tokenB,
     program: buildProgram({
       salt: params.salt,
+      concentrateArgs: buildConcentrateArgs({
+        sqrtPriceMin: params.sqrtPriceMin,
+        sqrtPriceMax: params.sqrtPriceMax,
+      }),
       unwindArgs: buildUnwindArgs({
         positionManager: params.positionManager,
         tokenId: params.tokenId,
@@ -124,6 +145,16 @@ export function loadStrategy(deployments: Deployments): LoadedStrategy {
   const tokenId = BigInt(deployments.position?.tokenId ?? 0)
   if (tokenId === 0n) throw new Error('no position in deployments/sepolia.json, run yarn setup first')
 
+  // A record written before the move to instruction 0x51 has no curve bounds, and rebuilding it would produce
+  // a program that hashes to something Aqua has never seen. Say which command fixes it rather than failing on
+  // `BigInt(undefined)` three lines down.
+  if (!record.sqrtPriceMin || !record.sqrtPriceMax) {
+    throw new Error(
+      'the recorded strategy predates the concentrated curve and carries no sqrt price bounds. Run yarn aqua ' +
+        'to ship a program built on instruction 0x51.',
+    )
+  }
+
   const params: StrategyParams = {
     vault: getAddress(deployments.vault),
     positionManager: getAddress(deployments.positionManager),
@@ -134,6 +165,8 @@ export function loadStrategy(deployments: Deployments): LoadedStrategy {
     haircutBps: record.haircutBps,
     maxUnwindPct: record.maxUnwindPct,
     unitsPerLiquidityE18: BigInt(record.unitsPerLiquidityE18),
+    sqrtPriceMin: BigInt(record.sqrtPriceMin),
+    sqrtPriceMax: BigInt(record.sqrtPriceMax),
   }
 
   const order = composeOrder(params)
