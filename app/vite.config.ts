@@ -19,8 +19,16 @@ const CHAIN_ROUTE = '/deployments/chain.json'
 
 const LP_HOST = 'https://liquidity.api.uniswap.org'
 const PUBLIC_SEPOLIA_RPC = 'https://ethereum-sepolia-rpc.publicnode.com'
-/** Where `yarn solver:serve` listens. Overridden by `SOLVER_URL` in the repository .env. */
-const SOLVER_HOST = 'http://127.0.0.1:8787'
+
+/**
+ * The fill lives in `solver/src`, outside this package, and the browser imports it from there.
+ *
+ * `fillPlan.ts` and `takerTraits.ts` are the whole fill: the sizing arithmetic and the port of
+ * `TakerTraitsLib.build`. `yarn fill` runs them in a terminal and this app runs them in a tab, and neither
+ * owns a copy. Vite needs the alias to resolve `@solver/...` and `server.fs.allow` to serve a file above the
+ * project root in dev.
+ */
+const SOLVER_SRC = resolve(repoRoot, 'solver/src')
 
 /**
  * The fixed Sepolia addresses live in `solver/src/config.ts`, which cannot be imported from a browser bundle
@@ -116,25 +124,17 @@ export default defineConfig(({ mode }) => {
     rewrite: () => '',
   }
 
-  /**
-   * The fill orchestrator, which signs with the key that owns the vault and therefore cannot live in the tab.
-   * Proxying it keeps the app same origin, so the default needs no CORS and no configuration: start
-   * `yarn solver:serve` and the button works. `VITE_SOLVER_URL` bypasses this entirely when set.
-   */
-  const solverProxy = {
-    target: env.SOLVER_URL || SOLVER_HOST,
-    changeOrigin: true,
-    rewrite: (path: string) => path.replace(/^\/api\/solver/, ''),
-  }
-
-  const proxy = { '/api/uniswap': uniswapProxy, '/api/rpc': rpcProxy, '/api/solver': solverProxy }
+  // Two proxies and no backend. Neither of them runs any of this project's logic: one attaches the Uniswap
+  // key, the other forwards JSON-RPC. The fill itself happens in the tab, signed by the connected wallet.
+  const proxy = { '/api/uniswap': uniswapProxy, '/api/rpc': rpcProxy }
 
   return {
     plugins: [react(), addressFiles()],
     // One .env for the whole repository. Only VITE_ prefixed variables reach the bundle, which is why the
-    // Uniswap key and the deployer key can sit in the same file as VITE_SOLVER_URL without leaking.
+    // Uniswap key and the deployer key can sit in the same file as VITE_SEPOLIA_RPC_URL without leaking.
     envDir: repoRoot,
-    server: { port: 5173, proxy },
+    resolve: { alias: { '@solver': SOLVER_SRC } },
+    server: { port: 5173, proxy, fs: { allow: [repoRoot] } },
     preview: { port: 4173, proxy },
     build: { target: 'es2022', sourcemap: true },
   }

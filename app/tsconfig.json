@@ -17,7 +17,11 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "allowImportingTsExtensions": true,
-    "noEmit": true
+    "noEmit": true,
+    // The fill lives in solver/src and is imported from there rather than copied. Only the modules the app
+    // actually imports are pulled into this program, which is why the node only parts of the solver never
+    // reach it. The same alias is declared for the bundler in vite.config.ts.
+    "paths": { "@solver/*": ["../solver/src/*"] }
   },
   "include": ["src", "vite.config.ts"]
 }

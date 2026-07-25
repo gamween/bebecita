@@ -7,9 +7,9 @@ import { ok, unavailable, type Result } from './format'
 /**
  * A fill, read back out of its receipt.
  *
- * The solver already proves this on the command line, but a dashboard that reprinted the solver's own summary
- * would only be proving that the solver can print. So the transaction hash is the only thing taken on trust:
- * everything shown about a fill is decoded here, from logs fetched from the chain.
+ * The fill runs in this tab and knows what it asked for, but a dashboard that reprinted its own request would
+ * only be proving that it can print. So the transaction hash is the only thing taken on trust: everything
+ * shown about a fill is decoded here, from logs fetched from the chain.
  *
  * Four events tell the whole story of one fill, and they come from four different contracts:
  *

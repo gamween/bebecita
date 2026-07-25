@@ -2,37 +2,20 @@
  * One complete fill on Ethereum Sepolia, funded by unwinding the Uniswap position inside the same transaction.
  *
  * Run with `yarn fill`, after `yarn setup` and `yarn aqua`. This is the whole product in one command: it
- * quotes the book, sizes the withdrawal from that quote, asks the Uniswap API for the two payloads, hands them
- * to a Foundry script that encodes the taker traits, and sends the swap from the taker's own key.
+ * quotes the book, sizes the withdrawal from that quote, asks the Uniswap API for the two payloads, encodes
+ * the taker traits and sends the swap from the taker's own key.
  *
- * The ordering below is the design, not a convenience.
+ * The decisions all live in `solver/src/fillPlan.ts`, which is the same module the browser runs. This file is
+ * the terminal half of it: a viem transport for the reads, an `x-api-key` header on the two API calls, a
+ * private key on the broadcast. `app/src/lib/fill.ts` is the other half, with the connected wallet in place of
+ * the key, and there is no third copy of the sizing arithmetic anywhere.
  *
- *   1. Quote through `quote()` on a staticcall. It is non `view` in the implementation and `view` in
- *      `ISwapVM`, which is what `asView()` exists to express, so an `eth_call` is the honest way to read it.
- *      Instruction `0x92` runs inside that call and clamps the quotable balance to what the position can
- *      genuinely release, so the number that comes back is already the truthful one.
- *   2. Size the unwind from the `amountOut` that quote returned, not from the input amount and not from a
- *      guess. `liquidityPercentageToDecrease` is an integer in [1, 100], so the percentage is rounded UP and
- *      the surplus stays in the vault as float. A just in time withdrawal can never be exact, and pretending
- *      otherwise would put the fill one wei short of the hook's floor check.
- *   3. `POST /lp/decrease` for that percentage and `POST /lp/increase` for the redeposit. Both are built by
- *      the API against live chain state, which is why they cannot be baked into the immutable order and have
- *      to travel with the taker.
- *   4. Encode the taker traits in Solidity, in `contracts/script/Fill.s.sol`, using the sponsor's own
- *      `TakerTraitsLib.build`. See that file for why this is not done here.
- *   5. Send `swap()` from the taker EOA, which must have approved the router for `tokenIn`.
- *   6. Read the receipt back and prove the claim: a `Swapped` event, and two PositionManager calls in the
- *      same transaction.
- *
- * Two failure modes are worth recognising on sight. An Aqua shortfall surfaces as `ERC20InsufficientBalance`
- * from the token rather than as an Aqua error, because `Aqua.pull` decrements the virtual balance first and
- * calls `safeTransferFrom` afterwards. A misaligned taker traits header surfaces as
- * `TakerTraitsAmountOutMustBeGreaterThanZero`, because a wrong slice index decodes a different slice rather
- * than failing to decode.
+ * The taker traits are built by `solver/src/takerTraits.ts`, a port of the sponsor's `TakerTraitsLib.build`
+ * proved byte for byte against it in `contracts/test/TakerTraits.t.sol`. `contracts/script/Fill.s.sol` is the
+ * Solidity reference that test diffs against, and this command still writes the handover file that script
+ * reads, so the same fill can be replayed through Foundry when a trace is wanted.
  */
-import { execFileSync } from 'node:child_process'
-import { readFileSync, writeFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { writeFileSync } from 'node:fs'
 
 import {
   createPublicClient,
@@ -49,6 +32,7 @@ import { privateKeyToAccount } from 'viem/accounts'
 import { sepolia } from 'viem/chains'
 
 import { SEPOLIA, env } from './config.js'
+import { planFill, type ChainReader, type LiquidityApi } from './fillPlan.js'
 import {
   FILL_REQUEST_PATH,
   FILL_REQUEST_RELATIVE,
@@ -58,35 +42,8 @@ import {
 } from './strategy.js'
 import { UniswapClient } from './uniswap.js'
 
-const ROOT = resolve(import.meta.dirname, '../..')
-
 /** Default clip, in whole tokens of the input side. Override with `--amount=`. */
 const DEFAULT_AMOUNT = 1_000n
-
-/**
- * Margin added on top of the exact percentage before rounding up.
- *
- * The instruction values a unit of position liquidity with the maker's conservative conversion factor and
- * does not reproduce v4 tick math, so the amount a withdrawal actually releases can differ slightly from the
- * linear estimate. The vault's first guard is a floor on the realised delta, `outAfter >= outBefore +
- * amountOut`, and it is checked after the payload has run, so being one percent short there costs a reverted
- * fill. Five percent here is the same margin as the maker's haircut and it cannot push the request past the
- * cap: the instruction has already clamped `amountOut` to 23.75% of the position, and 23.75 x 1.05 rounds to
- * 25, which is exactly `maxUnwindPct`.
- */
-const UNWIND_SAFETY = 0.05
-
-/**
- * Share of the free float the redeposit puts back to work.
- *
- * The remainder absorbs the difference between what the API quotes for the redeposit and what the position
- * manager actually settles at the current price. A redeposit that asks for more than the vault holds reverts
- * the whole fill inside Permit2, so this errs downward on purpose and leaves a little dust behind.
- */
-const REDEPOSIT_SHARE = 98n
-
-/** Slippage floor on the fill itself, in basis points below the quote. */
-const FILL_SLIPPAGE_BPS = 50n
 
 const erc20Abi = parseAbi([
   'function allowance(address owner, address spender) view returns (uint256)',
@@ -98,6 +55,7 @@ const erc20Abi = parseAbi([
 const routerAbi = parseAbi([
   'struct Order { address maker; uint256 traits; bytes data; }',
   'function quote(Order order, uint256 amount, bytes takerTraitsAndData) view returns (uint256 amountIn, uint256 amountOut, bytes32 orderHash)',
+  'function swap(Order order, uint256 amount, bytes takerTraitsAndData) payable returns (uint256 amountIn, uint256 amountOut, bytes32 orderHash)',
   'event Swapped(bytes32 orderHash, address maker, address taker, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut)',
 ])
 
@@ -119,24 +77,6 @@ const aquaAbi = parseAbi([
 
 const step = (n: number, label: string) => console.log(`\n[${n}] ${label}`)
 const info = (label: string, value: unknown = '') => console.log(`    ${label}${value === '' ? '' : `  ${value}`}`)
-
-/**
- * The 22 byte taker traits header for a quote, which is the degenerate case of `TakerTraitsLib.build`.
- *
- * A quote carries no threshold, no recipient, no deadline, no hook data and no instruction arguments, so all
- * ten slice indexes are zero and the header collapses to twenty zero bytes followed by the flag word. That is
- * the one shape with no arithmetic in it, which is why it is safe to write here while the fill's header, whose
- * indexes are running sums over four payloads, is built by the sponsor's own library in Solidity.
- *
- * Only `isExactIn` and `isAToB` reach the VM, so this quotes exactly what the fill will execute.
- */
-const IS_EXACT_IN_BIT_FLAG = 0x0001
-const IS_A_TO_B_BIT_FLAG = 0x0080
-
-function quoteTakerTraits(options: { isExactIn: boolean; isAToB: boolean }): Hex {
-  const flags = (options.isExactIn ? IS_EXACT_IN_BIT_FLAG : 0) | (options.isAToB ? IS_A_TO_B_BIT_FLAG : 0)
-  return `0x${'00'.repeat(20)}${flags.toString(16).padStart(4, '0')}`
-}
 
 /** `--amount=250` means 250 whole tokens of the input side. */
 function parseAmountArg(): bigint {
@@ -168,12 +108,74 @@ async function main() {
   // `isAToB` reads the order's two tokens in the sorted order they are stored in, so token A is token0.
   // The taker pays token0 and is paid token1.
   const isAToB = true
-  const [tokenIn, tokenOut] = isAToB ? [token0, token1] : [token1, token0]
   const amount = parseAmountArg()
+  const dryRun = process.argv.includes('--dry')
+
+  /** The chain half of the plan's environment: four view calls, nothing else. */
+  const chain: ChainReader = {
+    quote: async ({ order, amount: quoteAmount, takerTraitsAndData }) => {
+      const [amountIn, amountOut, orderHash] = await publicClient.readContract({
+        address: router,
+        abi: routerAbi,
+        functionName: 'quote',
+        args: [order, quoteAmount, takerTraitsAndData],
+      })
+      return { amountIn, amountOut, orderHash }
+    },
+    positionLiquidity: async (id) =>
+      publicClient.readContract({
+        address: positionManager,
+        abi: posmAbi,
+        functionName: 'getPositionLiquidity',
+        args: [id],
+      }),
+    balanceOf: async (token, owner) =>
+      publicClient.readContract({ address: token, abi: erc20Abi, functionName: 'balanceOf', args: [owner] }),
+    reachableFromPosition: async (maker) =>
+      publicClient.readContract({ address: maker, abi: vaultAbi, functionName: 'reachableFromPosition' }),
+  }
+
+  /** The API half. The browser implements the same two methods through the dev server proxy. */
+  const api: LiquidityApi = {
+    decrease: async (params) => {
+      const response = await uniswap.decrease({
+        walletAddress: params.walletAddress,
+        tokenId: params.tokenId.toString(),
+        token0: params.token0,
+        token1: params.token1,
+        percent: params.percent,
+      })
+      return {
+        to: getAddress(response.decrease.to),
+        data: response.decrease.data as Hex,
+        amount0: BigInt((response.token0 as { amount: string }).amount),
+        amount1: BigInt((response.token1 as { amount: string }).amount),
+      }
+    },
+    increase: async (params) => {
+      const response = await uniswap.increase({
+        walletAddress: params.walletAddress,
+        tokenId: params.tokenId.toString(),
+        token0: params.token0,
+        token1: params.token1,
+        independentToken: params.independentToken,
+        independentAmount: params.independentAmount.toString(),
+      })
+      return { to: getAddress(response.increase.to), data: response.increase.data as Hex }
+    },
+  }
 
   const [symbolIn, symbolOut] = await Promise.all([
-    publicClient.readContract({ address: tokenIn, abi: erc20Abi, functionName: 'symbol' }),
-    publicClient.readContract({ address: tokenOut, abi: erc20Abi, functionName: 'symbol' }),
+    publicClient.readContract({
+      address: isAToB ? token0 : token1,
+      abi: erc20Abi,
+      functionName: 'symbol',
+    }),
+    publicClient.readContract({
+      address: isAToB ? token1 : token0,
+      abi: erc20Abi,
+      functionName: 'symbol',
+    }),
   ])
 
   console.log('\nBebecita fill, Ethereum Sepolia')
@@ -201,148 +203,100 @@ async function main() {
     })
   info('aqua balances   ', `${formatUnits(aquaBalance0, 18)} / ${formatUnits(aquaBalance1, 18)}`)
 
-  // -------------------------------------------------------------------
-  step(1, 'quote() through a staticcall, which is what asView() is for')
-  // -------------------------------------------------------------------
-
-  const takerTraitsForQuote = quoteTakerTraits({ isExactIn: true, isAToB })
-  const [quotedIn, quotedOut, quotedHash] = await publicClient.readContract({
-    address: router,
-    abi: routerAbi,
-    functionName: 'quote',
-    args: [
-      { maker: strategy.order.maker, traits: strategy.order.traits, data: strategy.order.data },
-      amount,
-      takerTraitsForQuote,
-    ],
-  })
-
-  if (quotedHash !== strategy.orderHash) {
-    throw new Error(`router.quote reports order hash ${quotedHash}, the shipped one is ${strategy.orderHash}`)
-  }
-  if (quotedOut === 0n) throw new Error('the book quoted nothing, there is no fill to make')
-
-  info('amountIn        ', tokens(quotedIn, symbolIn))
-  info('amountOut       ', tokens(quotedOut, symbolOut))
-  info('price           ', `${formatUnits((quotedOut * 10n ** 18n) / quotedIn, 18)} ${symbolOut} per ${symbolIn}`)
-
-  const amountOutMin = (quotedOut * (10_000n - FILL_SLIPPAGE_BPS)) / 10_000n
-  info('amountOutMin    ', `${tokens(amountOutMin, symbolOut)}, ${FILL_SLIPPAGE_BPS} bps below the quote`)
-
-  // -------------------------------------------------------------------
-  step(2, 'size the unwind from amountOut, and round the percentage up')
-  // -------------------------------------------------------------------
-
-  const liquidity = await publicClient.readContract({
-    address: positionManager,
-    abi: posmAbi,
-    functionName: 'getPositionLiquidity',
-    args: [tokenId],
-  })
-  if (liquidity === 0n) throw new Error(`position ${tokenId} carries no liquidity, there is nothing to unwind`)
-
-  const [floatIn, floatOut, reachable] = await Promise.all([
-    publicClient.readContract({ address: tokenIn, abi: erc20Abi, functionName: 'balanceOf', args: [vault] }),
-    publicClient.readContract({ address: tokenOut, abi: erc20Abi, functionName: 'balanceOf', args: [vault] }),
-    publicClient.readContract({ address: vault, abi: vaultAbi, functionName: 'reachableFromPosition' }),
-  ])
-
-  // The maker's own conversion factor, the same one instruction 0x92 and the vault's guards read.
-  const deployed = (liquidity * strategy.params.unitsPerLiquidityE18) / 10n ** 18n
-
-  // The vault's first guard is a delta check, `outAfter >= outBefore + amountOut`, so the float already in the
-  // vault does not count towards it. The withdrawal alone has to release the whole payout.
-  const exactPct = (Number((quotedOut * 10n ** 12n) / deployed) / 1e12) * 100
-  const percent = Math.max(1, Math.ceil(exactPct * (1 + UNWIND_SAFETY)))
-
-  info('position        ', `tokenId ${tokenId}, liquidity ${liquidity}`)
-  info('deployed        ', `${tokens(deployed, symbolOut)} per side at the maker's conversion factor`)
-  info('reachable       ', `${tokens(reachable, symbolOut)} after the ${strategy.params.maxUnwindPct}% cap and the haircut`)
-  info('vault float     ', `${tokens(floatIn, symbolIn)} / ${tokens(floatOut, symbolOut)}`)
-  info('exact unwind    ', `${exactPct.toFixed(6)}% of the position`)
-  info('requested       ', `${percent}%, rounded up because liquidityPercentageToDecrease is an integer`)
-
-  if (percent > strategy.params.maxUnwindPct) {
-    throw new Error(
-      `sizing wants ${percent}% of the position and the maker authorised ${strategy.params.maxUnwindPct}%. ` +
-        'Instruction 0x92 should have clamped the quote below that, so this means the order and the vault ' +
-        'disagree on the risk parameters.',
-    )
-  }
-
-  // -------------------------------------------------------------------
-  step(3, 'POST /lp/decrease for the unwind, POST /lp/increase for the redeposit')
-  // -------------------------------------------------------------------
-
-  const decrease = await uniswap.decrease({
-    walletAddress: vault,
-    tokenId: tokenId.toString(),
+  const plan = await planFill(chain, api, {
+    order: strategy.order,
+    orderHash: strategy.orderHash,
+    taker: account.address,
+    vault,
+    positionManager,
+    tokenId,
     token0,
     token1,
-    percent,
+    isAToB,
+    amount,
+    unitsPerLiquidityE18: strategy.params.unitsPerLiquidityE18,
+    maxUnwindPct: strategy.params.maxUnwindPct,
+    onStep: ({ index, label }) => step(index, label),
   })
-  const released0 = BigInt((decrease.token0 as { amount: string }).amount)
-  const released1 = BigInt((decrease.token1 as { amount: string }).amount)
-  const [releasedIn, releasedOut] = isAToB ? [released0, released1] : [released1, released0]
-  const decreaseCalldata = decrease.decrease.data as Hex
 
-  info('/lp/decrease    ', `${percent}% -> ${tokens(releasedIn, symbolIn)} + ${tokens(releasedOut, symbolOut)}`)
-  info('target          ', decrease.decrease.to)
-  info('calldata        ', `${(decreaseCalldata.length - 2) / 2} bytes`)
-
-  if (releasedOut < quotedOut) {
-    throw new Error(
-      `${percent}% of the position releases ${formatUnits(releasedOut, 18)} ${symbolOut} and the fill owes ` +
-        `${formatUnits(quotedOut, 18)}. The vault's floor check would revert, so the sizing is wrong.`,
-    )
-  }
-  const surplus = releasedOut - quotedOut
-  info('surplus float   ', `${tokens(surplus, symbolOut)} stays in the vault, the cost of an integer percentage`)
-
-  // What the vault will hold when `postTransferIn` runs. The pull has already paid the taker by then, and the
-  // push has already credited the vault with the taker's input, which is exactly why the redeposit can be two
-  // sided at all.
-  const availableOut = floatOut + releasedOut - quotedOut
-  const availableIn = floatIn + releasedIn + quotedIn
-  const redeposit = ((availableOut < availableIn ? availableOut : availableIn) * REDEPOSIT_SHARE) / 100n
-  if (redeposit === 0n) throw new Error('nothing left to redeposit after the fill, the sizing is wrong')
-
-  const increase = await uniswap.increase({
-    walletAddress: vault,
-    tokenId: tokenId.toString(),
-    token0,
-    token1,
-    independentToken: tokenOut,
-    independentAmount: redeposit.toString(),
-  })
-  const increaseCalldata = increase.increase.data as Hex
-
-  info('after the pull  ', `${tokens(availableIn, symbolIn)} / ${tokens(availableOut, symbolOut)} in the vault`)
-  info('/lp/increase    ', `${tokens(redeposit, symbolOut)} named, the API computes the other leg`)
-  info('target          ', increase.increase.to)
-  info('calldata        ', `${(increaseCalldata.length - 2) / 2} bytes`)
+  info('amountIn        ', tokens(plan.quotedIn, symbolIn))
+  info('amountOut       ', tokens(plan.quotedOut, symbolOut))
+  info('price           ', `${formatUnits((plan.quotedOut * 10n ** 18n) / plan.quotedIn, 18)} ${symbolOut} per ${symbolIn}`)
+  info('amountOutMin    ', tokens(plan.amountOutMin, symbolOut))
+  info('position        ', `tokenId ${tokenId}, liquidity ${plan.liquidity}`)
+  info('deployed        ', `${tokens(plan.deployed, symbolOut)} per side at the maker's conversion factor`)
+  info('reachable       ', `${tokens(plan.reachable, symbolOut)} after the ${strategy.params.maxUnwindPct}% cap and the haircut`)
+  info('vault float     ', `${tokens(plan.floatIn, symbolIn)} / ${tokens(plan.floatOut, symbolOut)}`)
+  info('exact unwind    ', `${plan.exactPct.toFixed(6)}% of the position`)
+  info('requested       ', `${plan.unwindPercent}%, rounded up because liquidityPercentageToDecrease is an integer`)
+  info('/lp/decrease    ', `${plan.unwindPercent}% -> ${tokens(plan.releasedIn, symbolIn)} + ${tokens(plan.releasedOut, symbolOut)}`)
+  info('calldata        ', `${(plan.decreaseCalldata.length - 2) / 2} bytes`)
+  info('surplus float   ', `${tokens(plan.surplus, symbolOut)} stays in the vault, the cost of an integer percentage`)
+  info('/lp/increase    ', `${tokens(plan.redeposit, symbolOut)} named, the API computes the other leg`)
+  info('calldata        ', `${(plan.increaseCalldata.length - 2) / 2} bytes`)
+  info('taker traits    ', `${(plan.takerTraitsAndData.length - 2) / 2} bytes`)
   info('api quota left  ', uniswap.remainingQuota ?? 'n/a')
 
-  if (getAddress(decrease.decrease.to) !== positionManager || getAddress(increase.increase.to) !== positionManager) {
-    throw new Error('the API built calldata for a contract other than the pinned position manager')
+  // The same request the Solidity reference in `contracts/script/Fill.s.sol` reads, so this fill can be
+  // replayed through Foundry when a call trace is wanted. Nothing on this path depends on it.
+  writeFileSync(
+    FILL_REQUEST_PATH,
+    `${JSON.stringify(
+      {
+        router,
+        taker: account.address,
+        positionManager,
+        tokenIn: plan.tokenIn,
+        tokenOut: plan.tokenOut,
+        amount: amount.toString(),
+        amountOutMin: plan.amountOutMin.toString(),
+        unwindPercent: plan.unwindPercent,
+        order: {
+          maker: strategy.order.maker,
+          traits: strategy.order.traits.toString(),
+          data: strategy.order.data,
+        },
+        decreaseCalldata: plan.decreaseCalldata,
+        increaseCalldata: plan.increaseCalldata,
+        takerTraitsAndData: plan.takerTraitsAndData,
+      },
+      null,
+      2,
+    )}\n`,
+  )
+  info('handover file   ', `${FILL_REQUEST_RELATIVE}, replayable with contracts/script/Fill.s.sol`)
+
+  // -------------------------------------------------------------------
+  step(5, 'approve the router for the input token, once')
+  // -------------------------------------------------------------------
+
+  const [allowance, takerBalance] = await Promise.all([
+    publicClient.readContract({
+      address: plan.tokenIn,
+      abi: erc20Abi,
+      functionName: 'allowance',
+      args: [account.address, router],
+    }),
+    publicClient.readContract({
+      address: plan.tokenIn,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [account.address],
+    }),
+  ])
+
+  if (takerBalance < plan.quotedIn) {
+    throw new Error(
+      `taker holds ${formatUnits(takerBalance, 18)} ${symbolIn} and the fill needs ${formatUnits(plan.quotedIn, 18)}. ` +
+        'TestERC20.mint is public, so any address can fund itself.',
+    )
   }
 
-  // -------------------------------------------------------------------
-  step(4, 'approve the router for the input token, once')
-  // -------------------------------------------------------------------
-
-  const allowance = await publicClient.readContract({
-    address: tokenIn,
-    abi: erc20Abi,
-    functionName: 'allowance',
-    args: [account.address, router],
-  })
-
-  if (allowance < quotedIn) {
+  if (allowance < plan.quotedIn) {
     // `useTransferFromAndAquaPush` makes the router pull the input from the taker and push it into Aqua on
     // the taker's behalf, so the approval goes to the router and not to Aqua.
     const hash = await wallet.writeContract({
-      address: tokenIn,
+      address: plan.tokenIn,
       abi: erc20Abi,
       functionName: 'approve',
       args: [router, 2n ** 256n - 1n],
@@ -354,63 +308,40 @@ async function main() {
     info('already approved', `${symbolIn} -> router`)
   }
 
-  const takerBalance = await publicClient.readContract({
-    address: tokenIn,
-    abi: erc20Abi,
-    functionName: 'balanceOf',
-    args: [account.address],
-  })
-  if (takerBalance < quotedIn) {
-    throw new Error(`taker holds ${formatUnits(takerBalance, 18)} ${symbolIn} and the fill needs ${formatUnits(quotedIn, 18)}`)
-  }
-
   // -------------------------------------------------------------------
-  step(5, 'encode the taker traits in Solidity and send swap()')
+  step(6, 'simulate, then send swap()')
   // -------------------------------------------------------------------
 
-  const request = {
-    router,
-    taker: account.address,
-    positionManager,
-    tokenIn,
-    tokenOut,
-    amount: amount.toString(),
-    amountOutMin: amountOutMin.toString(),
-    unwindPercent: percent,
-    order: {
-      maker: strategy.order.maker,
-      traits: strategy.order.traits.toString(),
-      data: strategy.order.data,
-    },
-    decreaseCalldata,
-    increaseCalldata,
-  }
-  writeFileSync(FILL_REQUEST_PATH, `${JSON.stringify(request, null, 2)}\n`)
-  info('handover file   ', FILL_REQUEST_RELATIVE)
+  const swapArgs = {
+    address: router,
+    abi: routerAbi,
+    functionName: 'swap',
+    args: [plan.order, amount, plan.takerTraitsAndData],
+    account,
+  } as const
 
-  // The script asserts the two position manager calls with `vm.expectCall` before it broadcasts anything, so
-  // reaching the next line already means the claim held in simulation. The count below is read off the trace
-  // for the demo, not to decide anything.
-  const dryRun = process.argv.includes('--dry')
-  const trace = runFillScript({ broadcast: !dryRun })
-  const positionManagerCalls = countPositionManagerCalls(trace, positionManager)
-  info('simulated trace ', `${positionManagerCalls} modifyLiquidities calls to ${positionManager}`)
+  // The simulation runs the whole program against live state and reverts with the VM's own error when the
+  // fill cannot settle, which is worth having before a nonce is spent.
+  const { result } = await publicClient.simulateContract(swapArgs)
+  const [simulatedIn, simulatedOut, simulatedHash] = result
+  info('simulated       ', `${tokens(simulatedIn, symbolIn)} in, ${tokens(simulatedOut, symbolOut)} out`)
+  info('orderHash       ', simulatedHash)
 
   if (dryRun) {
     console.log('\nDry run only. The same command without --dry broadcasts it.\n')
     return
   }
 
-  const txHash = readBroadcastHash()
+  const txHash = await wallet.writeContract(swapArgs)
   info('transaction     ', txHash)
 
   // -------------------------------------------------------------------
-  step(6, 'read the receipt back')
+  step(7, 'read the receipt back')
   // -------------------------------------------------------------------
 
   const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash })
   if (receipt.status !== 'success') {
-    throw new Error(`the fill reverted, ${txHash}. Read the trace above, not the status.`)
+    throw new Error(`the fill reverted, ${txHash}. Read the trace on Etherscan, not the status.`)
   }
   info('status          ', `success, block ${receipt.blockNumber}, gas ${receipt.gasUsed}`)
 
@@ -454,21 +385,22 @@ async function main() {
       throw new Error(`ModifyLiquidity came from ${log.args.sender}, expected the position manager`)
     }
   }
-  info('  simulated trace', `${positionManagerCalls} modifyLiquidities calls to ${positionManager}`)
 
-  const liquidityAfter = await publicClient.readContract({
-    address: positionManager,
-    abi: posmAbi,
-    functionName: 'getPositionLiquidity',
-    args: [tokenId],
-  })
-  const floatAfter = await publicClient.readContract({
-    address: tokenOut,
-    abi: erc20Abi,
-    functionName: 'balanceOf',
-    args: [vault],
-  })
-  info('  position now  ', `${liquidityAfter}, was ${liquidity}`)
+  const [liquidityAfter, floatAfter] = await Promise.all([
+    publicClient.readContract({
+      address: positionManager,
+      abi: posmAbi,
+      functionName: 'getPositionLiquidity',
+      args: [tokenId],
+    }),
+    publicClient.readContract({
+      address: plan.tokenOut,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [vault],
+    }),
+  ])
+  info('  position now  ', `${liquidityAfter}, was ${plan.liquidity}`)
   info('  vault float   ', tokens(floatAfter, symbolOut))
 
   deployments.lastFill = {
@@ -476,76 +408,15 @@ async function main() {
     orderHash: strategy.orderHash,
     amountIn: swapped.args.amountIn.toString(),
     amountOut: swapped.args.amountOut.toString(),
-    tokenIn,
-    tokenOut,
-    unwindPercent: percent,
+    tokenIn: plan.tokenIn,
+    tokenOut: plan.tokenOut,
+    unwindPercent: plan.unwindPercent,
     gasUsed: receipt.gasUsed.toString(),
     blockNumber: receipt.blockNumber.toString(),
   }
   writeDeployments(deployments)
 
   console.log(`\nFilled. https://sepolia.etherscan.io/tx/${txHash}\n`)
-}
-
-/**
- * Runs the Foundry script that encodes the traits and broadcasts, and returns its output.
- *
- * `--skip test` is not optional: `via_ir` makes a full build cost close to four minutes and the test suite is
- * not needed to send one transaction. `-vvvv` is what makes the simulated call trace available, which is the
- * only trace we get, because the public Sepolia endpoints answer `debug_traceTransaction` with a 403 and
- * `cast run` needs an archive node.
- */
-function runFillScript(options: { broadcast: boolean }): string {
-  const args = ['script', 'contracts/script/Fill.s.sol', '--rpc-url', env.rpcUrl, '--skip', 'test', '-vvvv']
-  if (options.broadcast) args.push('--broadcast')
-
-  const output = execFileSync('forge', args, {
-    cwd: ROOT,
-    encoding: 'utf8',
-    maxBuffer: 256 * 1024 * 1024,
-    env: { ...process.env },
-  })
-
-  // The interesting half is the trace and the amounts. The rest is compiler and broadcast bookkeeping.
-  for (const line of output.split('\n')) {
-    if (/^\s{2}(router|taker|amount|decrease|increase|orderHash|amountIn|amountOut|taker traits)/.test(line)) {
-      console.log(`    ${line.trim()}`)
-    }
-  }
-  return output
-}
-
-/**
- * Distinct `modifyLiquidities` payloads sent to the position manager, read off the simulated call trace.
- *
- * Two details make the naive grep wrong. Foundry prints the whole trace twice under `--broadcast`, once for
- * the simulation and once for the run, so calls are counted by payload rather than by line. And the address of
- * the position manager also appears inside the order data, because the instruction's arguments name it, so the
- * match is anchored on the `::selector(` form rather than on the address appearing anywhere in the line.
- */
-function countPositionManagerCalls(trace: string, positionManager: Address): number {
-  const call = new RegExp(
-    `(?:positionmanager|${positionManager.toLowerCase()})::(?:modifyliquidities|(?:0x)?dd46508f)\\((0x[0-9a-f]+)`,
-  )
-  const payloads = new Set<string>()
-  for (const line of trace.split('\n')) {
-    const payload = line.toLowerCase().match(call)?.[1]
-    if (payload) payloads.add(payload)
-  }
-  return payloads.size
-}
-
-/** The hash of the transaction the script just broadcast. */
-function readBroadcastHash(): Hex {
-  const path = resolve(ROOT, `broadcast/Fill.s.sol/${SEPOLIA.chainId}/run-latest.json`)
-  const run = JSON.parse(readFileSync(path, 'utf8')) as {
-    transactions: { hash?: string; transaction?: { to?: string } }[]
-  }
-  const sent = run.transactions.filter((tx) => tx.hash)
-  if (sent.length !== 1) {
-    throw new Error(`expected exactly one broadcast transaction, the run recorded ${sent.length}`)
-  }
-  return sent[0]!.hash as Hex
 }
 
 main().catch((error) => {
