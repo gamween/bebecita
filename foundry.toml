@@ -8,7 +8,11 @@ solc_version   = "0.8.30"
 optimizer      = true
 optimizer_runs = 700
 via_ir         = true
-fs_permissions = [{ access = "read-write", path = "./deployments" }]
+fs_permissions = [
+  { access = "read-write", path = "./deployments" },
+  # Test vectors written by `yarn fixtures`, read by contracts/test/TakerTraits.t.sol.
+  { access = "read", path = "./contracts/test/fixtures" },
+]
 
 [rpc_endpoints]
 sepolia = "${SEPOLIA_RPC_URL}"
