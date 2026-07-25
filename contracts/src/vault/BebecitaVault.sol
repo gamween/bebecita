@@ -6,6 +6,8 @@ import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.s
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { IERC165 } from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 
+import { IPermit2 } from "@1inch/solidity-utils/contracts/interfaces/IPermit2.sol";
+
 import { IAqua } from "@1inch/aqua/src/interfaces/IAqua.sol";
 import { IMakerHooks } from "@1inch/swap-vm/src/interfaces/IMakerHooks.sol";
 
@@ -146,6 +148,20 @@ contract BebecitaVault is IMakerHooks, IHookStats, IERC165 {
     /// @notice Approve an arbitrary spender, used for Permit2 style setup flows returned by the LP API.
     function approve(address token, address spender, uint256 amount) external onlyOwner {
         IERC20(token).forceApprove(spender, amount);
+    }
+
+    /// @notice Grant a Permit2 allowance, which is how the v4 PositionManager gets paid for a redeposit.
+    /// @dev The position manager settles through Permit2, so an ERC20 approval alone funds nothing. The LP
+    ///      API says so in its own output: `/lp/check_approval` with `generatePermitAsTransaction: true`
+    ///      returns exactly two calls per token, an ERC20 `approve` to Permit2 and this Permit2 `approve` to
+    ///      the position manager. A maker that cannot sign EIP-712 has no other way to obtain that allowance,
+    ///      so the second call needs an entry point of its own. Owner only, and the selector is fixed here
+    ///      rather than taken from the payload.
+    function approveViaPermit2(address permit2, address token, address spender, uint160 amount, uint48 expiration)
+        external
+        onlyOwner
+    {
+        IPermit2(permit2).approve(token, spender, amount, expiration);
     }
 
     /// @notice Update the risk parameters the instruction and the guards read.
