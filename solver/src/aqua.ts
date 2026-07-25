@@ -56,7 +56,16 @@ const OP_UNWIND_PRICED_BALANCE_OUT = 0x92
 /** Risk parameters. These must match the vault, because the guards and the instruction read the same numbers. */
 const HAIRCUT_BPS = 500
 const MAX_UNWIND_PCT = 25
-const UNITS_PER_LIQUIDITY_E18 = 10n ** 18n
+/**
+ * Fallback only. The live figure is read from the vault, which is the single source of truth for it.
+ *
+ * This factor converts position liquidity into output token units, and for a wide range it is the square
+ * root of the pool price, so it is 1 only while the pool sits exactly at parity. Hardcoding it was safe for
+ * exactly as long as nothing moved the pool, and `yarn rebalance` is the first operation in the project that
+ * does move it. Reading it from the vault means one number, updated by `setRiskParams`, feeding both the
+ * quote path through the program args and the view path through `reachableFromPosition`.
+ */
+const UNITS_PER_LIQUIDITY_E18_FALLBACK = 10n ** 18n
 
 /**
  * Virtual balances shipped, asymmetric on purpose.
@@ -464,6 +473,17 @@ async function main() {
   })
   const concentrateArgs = buildConcentrateArgs(bounds)
 
+  // The conversion factor lives on the vault, so the quote path and the view path cannot disagree. It is the
+  // square root of the pool price, so it moves whenever the pool does, and `yarn rebalance` moves the pool.
+  const unitsPerLiquidity = await publicClient
+    .readContract({
+      address: vault,
+      abi: parseAbi(['function unitsPerLiquidityE18() view returns (uint128)']),
+      functionName: 'unitsPerLiquidityE18',
+    })
+    .catch(() => UNITS_PER_LIQUIDITY_E18_FALLBACK)
+  info('unitsPerLiq     ', unitsPerLiquidity)
+
   const order = buildOrder({
     maker: vault,
     tokenA,
@@ -476,7 +496,7 @@ async function main() {
         tokenId,
         haircutBps: HAIRCUT_BPS,
         maxUnwindPct: MAX_UNWIND_PCT,
-        unitsPerLiquidityE18: UNITS_PER_LIQUIDITY_E18,
+        unitsPerLiquidityE18: unitsPerLiquidity,
       }),
     }),
   })
@@ -562,7 +582,7 @@ async function main() {
       reachableAtShip: reachable.toString(),
       haircutBps: HAIRCUT_BPS,
       maxUnwindPct: MAX_UNWIND_PCT,
-      unitsPerLiquidityE18: UNITS_PER_LIQUIDITY_E18.toString(),
+      unitsPerLiquidityE18: unitsPerLiquidity.toString(),
       // The two curve bounds are part of the program bytes, so `strategy.ts` rebuilds the order from these
       // and never recomputes them: a tick converted twice must not be allowed to differ by one wei.
       sqrtPriceMin: bounds.sqrtPriceMin.toString(),
