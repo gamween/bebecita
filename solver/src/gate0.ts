@@ -1,5 +1,5 @@
 /**
- * Gate zero. The five checks that decide whether this project exists, in under two minutes.
+ * Gate zero. The six checks that decide whether this project exists, in under two minutes.
  *
  * Nothing else gets written until this passes. Run with `yarn gate0`.
  */
@@ -23,12 +23,13 @@ async function main() {
     ? ok('official Aqua has code', `${aquaCode.length} chars`)
     : (bad('official Aqua has no code'), failures++)
 
-  // 2. So is the Uniswap v4 PositionManager, and it answers the read the instruction depends on.
+  // 2. So is the Uniswap v4 PositionManager.
   const posmCode = await client.getCode({ address: getAddress(SEPOLIA.positionManager) })
   posmCode && posmCode.length > 2
     ? ok('v4 PositionManager has code')
     : (bad('v4 PositionManager has no code'), failures++)
 
+  // 3. And it answers the read the instruction depends on.
   try {
     const liquidity = await client.readContract({
       address: getAddress(SEPOLIA.positionManager),
@@ -50,7 +51,7 @@ async function main() {
     failures++
   }
 
-  // 3. The API key is live on the trade host.
+  // 4. The API key is live on the trade host.
   const uniswap = new UniswapClient({ apiKey: env.apiKey, chainId: SEPOLIA.chainId, protocol: 'V4' })
   try {
     await uniswap.supportedChains()
@@ -60,7 +61,7 @@ async function main() {
     failures++
   }
 
-  // 4. And on the LP host, which is a different origin and the one that actually matters here.
+  // 5. And on the LP host, which is a different origin and the one that actually matters here.
   //    The seven /lp/* paths carry a per-path server override to liquidity.api.uniswap.org.
   try {
     await uniswap.poolInfo({
@@ -75,7 +76,7 @@ async function main() {
     failures++
   }
 
-  // 5. The deployer can pay for gas.
+  // 6. The deployer can pay for gas.
   try {
     const { privateKeyToAccount } = await import('viem/accounts')
     const account = privateKeyToAccount(env.privateKey as `0x${string}`)
