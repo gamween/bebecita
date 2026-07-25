@@ -51,7 +51,9 @@ npm run snapshot                                         # starts with a clean, 
 | `contracts/src/vault/BebecitaVault.sol` | The maker. Holds the position, implements the hooks and their four guards, reports URC-3. |
 | `contracts/test/Bebecita.t.sol` | Everything above, asserted. Start here to understand the system. |
 | `solver/src/uniswap.ts` | LP API client. Read the header comment, it contains the host trap. |
-| `solver/src/gate0.ts` | The five checks that decide whether the project exists. |
+| `solver/src/gate0.ts` | The six checks that decide whether the project exists. |
+| `solver/src/setup.ts` | `yarn setup`. Pool, position, vault redeploy, ERC721 custody. Resumable. |
+| `solver/src/aqua.ts` | `yarn aqua`. Builds the order, ships it from the vault, checks the hash. Its builders are exported for the fill path. |
 
 ## Things that will bite you
 
@@ -69,6 +71,11 @@ document has a per-path server override. This is in the client already, do not u
 **Do not copy the SwapVM example from `1inch/sdks`.** `TestCustomSwapVM.sol` uses `_instructions()` and
 `_opcodes()`, removed from main on 2026-07-03. Copy `AquaOpcodesDebug.sol` instead, which is what our table
 already does.
+
+**The vault's `TOKEN_ID` is immutable, so the vault is deployed after the position.** `yarn setup` creates the
+position first and then runs `contracts/script/DeployVault.s.sol` against the tokenId that came out of the mint.
+If you ever recreate the position, the vault address changes with it, and `deployments/sepolia.json` is the
+source of truth for both.
 
 **`IS_FIRST_TRANSFER_FROM_TAKER` stays at zero.** That places `postTransferIn` after the pull, which is what
 lets the redeposit be two sided, which is what keeps the position in range and therefore earning. Flipping it
