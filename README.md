@@ -33,6 +33,31 @@ The router's `AQUA()` getter returns `0x499943E74FB0cE105688beeE8Ef2ABec5D936d31
 proves the official contracts are the ones doing the work. Its `OPCODE_UNWIND_PRICED_BALANCE_OUT()` returns
 `146`, that is `0x92`.
 
+## One fill, end to end
+
+```mermaid
+flowchart LR
+    subgraph VM["SwapVM program, runs before any token moves"]
+        OP["0x92 unwindPricedBalanceOut<br/>balanceOut = min(balanceOut, float + reachable)"]
+        CURVE["swap curve<br/>prices against the clamped depth"]
+        OP --> CURVE
+    end
+
+    HOOK1["preTransferOut<br/>vault executes /lp/decrease<br/>the position unwinds"]
+    PULL["AQUA.pull<br/>the taker is paid"]
+    PUSH["AQUA.push<br/>the vault is credited"]
+    HOOK2["postTransferIn<br/>vault executes /lp/increase<br/>the inventory goes back to work"]
+
+    CURVE --> HOOK1
+    HOOK1 -->|"SwapVM.sol:310-314 then :321, consecutive statements"| PULL
+    PULL --> PUSH
+    PUSH --> HOOK2
+```
+
+The arrow between the unwind and the payment is the whole design. `preTransferOut` is the only point in
+SwapVM guaranteed to run immediately before tokens leave the maker, and it holds in both transfer orders the
+router supports. That is what makes just in time collateral possible at all.
+
 ## The removal test, both ways
 
 This is the shortest description of what the project is, and it is the first thing to check.
