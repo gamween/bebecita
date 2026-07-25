@@ -8,6 +8,19 @@
 
 > Your Uniswap liquidity can quote an order book without leaving the pool.
 
+## Live on Ethereum Sepolia
+
+| Contract | Address |
+|---|---|
+| BebecitaRouter, our modified SwapVM | [`0x354422f6e4e3476b540E306A6DdFb4638d9EA5c3`](https://sepolia.etherscan.io/address/0x354422f6e4e3476b540E306A6DdFb4638d9EA5c3) |
+| BebecitaVault, the maker | [`0x3629819Ad2d0e34BA90cA6b206a8bBd36C609036`](https://sepolia.etherscan.io/address/0x3629819Ad2d0e34BA90cA6b206a8bBd36C609036) |
+| bALPHA | [`0xdB41CB0A2EEFF8Ed53Ef019D4C9826744f500B7F`](https://sepolia.etherscan.io/address/0xdB41CB0A2EEFF8Ed53Ef019D4C9826744f500B7F) |
+| bBRAVO | [`0x0128Ac6B5E3364b022e55A0cf9c0cb4987B3B20f`](https://sepolia.etherscan.io/address/0x0128Ac6B5E3364b022e55A0cf9c0cb4987B3B20f) |
+
+The router's `AQUA()` getter returns `0x499943E74FB0cE105688beeE8Ef2ABec5D936d31`, the canonical Aqua address, which is the one line that
+proves the official contracts are the ones doing the work. Its `OPCODE_UNWIND_PRICED_BALANCE_OUT()` returns
+`146`, that is `0x92`.
+
 ## The removal test, both ways
 
 This is the shortest description of what the project is, and it is the first thing to check.
