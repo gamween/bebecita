@@ -1,12 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { parseUnits, type Address, type Hex } from 'viem'
+import { useConnection, useWalletClient } from 'wagmi'
 
 import { NetworkPanel } from '../components/NetworkPanel'
-import { Addr, Metric, Show, Unit } from '../components/primitives'
-import type { Wallet } from '../App'
+import {
+  Addr,
+  Field,
+  Missing,
+  Num,
+  Panel,
+  Show,
+  StatedReasonsProvider,
+  Subhead,
+  TxLink,
+  Unit,
+} from '../components/primitives'
+import { TxStatus } from '../components/Tx'
 import { vaultAbi } from '../lib/abi'
-import { CHAIN, publicClient, walletClientFor } from '../lib/client'
+import { CHAIN } from '../lib/client'
 import type { AppConfig } from '../lib/config'
+import { describeError } from '../lib/errors'
 import {
   approveRouter,
   mintTo,
@@ -16,22 +29,23 @@ import {
   type FillStep,
 } from '../lib/fill'
 import {
-  addressUrl,
-  ago,
   amount as fmtAmount,
+  exact,
   integer,
   ok,
   reason,
-  short,
+  shortAddress,
+  shortHash,
   stringify,
-  txUrl,
   type Result,
 } from '../lib/format'
 import { readHistory, settled, type History } from '../lib/history'
 import { orderFrom, requestQuote, type QuoteResult } from '../lib/quote'
 import { readFillReceipt, type FillReceipt } from '../lib/receipt'
+import { NOT_READ_YET, readinessOf } from '../lib/readiness'
 import { ratio, slacOf, tokens as wholeTokens, type SlacLeg, type SlacNumerator } from '../lib/slac'
 import { readSnapshot, tokenOf, type Snapshot } from '../lib/state'
+import { txIdle, useTx, type TxState } from '../lib/tx'
 import { claimFees, decrease, findTransactionRequest, poolInfo, type TransactionRequest } from '../lib/uniswap'
 
 /** What Mint test tokens hands the connected wallet. Ten clips of the default size, so a demo does not repeat. */
@@ -44,7 +58,12 @@ type Action<T> =
   | { status: 'error'; message: string }
 
 const idle = { status: 'idle' } as const
-const notRead: Result<never> = { ok: false, reason: 'not read yet' }
+const notRead: Result<never> = { ok: false, reason: NOT_READ_YET }
+/**
+ * Said once, on the taker subhead, and then treated as stated: the three fields under it are all about a
+ * wallet that is not there, and the connect button in the top bar is the answer to all three.
+ */
+const NO_WALLET = 'no wallet connected, the connect button in the top bar makes it the taker of the fill'
 
 /** Chain state. Five seconds is the polite end of live, and the Uniswap API is not touched by it. */
 const STATE_POLL_MS = 5_000
@@ -53,13 +72,10 @@ const HISTORY_POLL_MS = 60_000
 /** The Uniswap key allows six requests a second. One pool_info per manual refresh, never on a render. */
 const POOL_INFO_MIN_GAP_MS = 15_000
 
-/** Grouped digits without the locale's comma, which reads badly next to hex. */
-const grouped = (value: number) => Math.round(value).toLocaleString('en-US').replace(/,/g, ' ')
-
 /** Position liquidity is a 1e18 scaled quantity, so it reads as a number rather than as a 24 digit integer. */
-const liquidityText = (value: bigint) => fmtAmount(value < 0n ? -value : value, 18, 2)
+const liquidityText = (value: bigint) => fmtAmount(value < 0n ? -value : value, 18)
 
-function ResultCard({
+function ResultPanel({
   title,
   state,
   children,
@@ -69,14 +85,13 @@ function ResultCard({
   children?: React.ReactNode
 }) {
   if (state.status === 'idle') return null
-  const className = state.status === 'ok' ? 'result ok' : state.status === 'error' ? 'result error' : 'result pending'
+  const accent = state.status === 'ok' ? 'ok' : state.status === 'error' ? 'bad' : 'pending'
   return (
-    <div className={className}>
-      <h4>{title}</h4>
+    <Panel accent={accent} title={title}>
       {state.status === 'pending' ? <div className="muted">waiting on the network</div> : null}
-      {state.status === 'error' ? <div className="mono" style={{ overflowWrap: 'anywhere' }}>{state.message}</div> : null}
+      {state.status === 'error' ? <div className="failure mono">{state.message}</div> : null}
       {state.status === 'ok' ? children : null}
-    </div>
+    </Panel>
   )
 }
 
@@ -87,7 +102,7 @@ function TxRequestView({ tx, expected }: { tx: TransactionRequest | null; expect
     <dl className="kv">
       <dt>to</dt>
       <dd>
-        <Addr value={tx.to} length={10} />{' '}
+        <Addr value={tx.to} />{' '}
         {expected ? (
           pinned ? (
             <span className="faint">matches the position manager the vault pins</span>
@@ -145,39 +160,32 @@ function SlacCard({
     <div className="slac-card">
       <div className="slac-title">{title}</div>
       <div className="slac-value">
-        {leg.ratio.ok ? (
-          <span className="num">{ratio(leg.ratio.value)}</span>
-        ) : (
-          <>
-            <span className="unavailable">undefined</span>
-            <span className="why">{leg.ratio.reason}</span>
-          </>
-        )}
+        <Show result={leg.ratio}>{(value) => <span className="num">{ratio(value)}</span>}</Show>
       </div>
       <dl className="kv slac-kv">
         <dt>provisioned</dt>
         <dd>
           {numerator.ok ? (
             <>
-              {grouped(wholeTokens(numerator.value.total))}
+              {integer(Math.round(wholeTokens(numerator.value.total)))}
               <span className="unit">
                 tokens over {strategies} {strategies === 1 ? 'strategy' : 'strategies'}
                 {numerator.value.missing ? `, ${numerator.value.missing} balance unread` : ''}
               </span>
             </>
           ) : (
-            <span className="unavailable">{numerator.reason}</span>
+            <Missing reason={numerator.reason} />
           )}
         </dd>
         <dt>equity</dt>
         <dd>
           {leg.denominator.ok ? (
             <>
-              {grouped(wholeTokens(leg.denominator.value))}
+              {integer(Math.round(wholeTokens(leg.denominator.value)))}
               <span className="unit">tokens</span>
             </>
           ) : (
-            <span className="unavailable">{leg.denominator.reason}</span>
+            <Missing reason={leg.denominator.reason} />
           )}
         </dd>
         <dt>denominator</dt>
@@ -202,11 +210,9 @@ function FillReceiptView({ receipt, snapshot }: { receipt: FillReceipt; snapshot
       <dl className="kv">
         <dt>transaction</dt>
         <dd>
-          <a href={txUrl(receipt.hash)} target="_blank" rel="noreferrer">
-            {receipt.hash}
-          </a>
+          <TxLink hash={receipt.hash} />
           <span className="unit">
-            {receipt.status === 'success' ? 'success' : 'reverted'}, block {receipt.blockNumber.toString()}, gas{' '}
+            {receipt.status === 'success' ? 'success' : 'reverted'}, block {integer(receipt.blockNumber)}, gas{' '}
             {integer(receipt.gasUsed)}
           </span>
         </dd>
@@ -214,14 +220,14 @@ function FillReceiptView({ receipt, snapshot }: { receipt: FillReceipt; snapshot
         <dd>
           {receipt.swapped.ok ? (
             <>
-              {fmtAmount(receipt.swapped.value.amountIn, decimalsOf(receipt.swapped.value.tokenIn), 6)}{' '}
+              {fmtAmount(receipt.swapped.value.amountIn, decimalsOf(receipt.swapped.value.tokenIn))}{' '}
               {symbolOf(receipt.swapped.value.tokenIn)} in, {' '}
-              {fmtAmount(receipt.swapped.value.amountOut, decimalsOf(receipt.swapped.value.tokenOut), 6)}{' '}
+              {fmtAmount(receipt.swapped.value.amountOut, decimalsOf(receipt.swapped.value.tokenOut))}{' '}
               {symbolOf(receipt.swapped.value.tokenOut)} out
-              <span className="unit">taker {short(receipt.swapped.value.taker, 8, 6)}</span>
+              <span className="unit">taker {shortAddress(receipt.swapped.value.taker)}</span>
             </>
           ) : (
-            <span className="unavailable">{receipt.swapped.reason}</span>
+            <Missing reason={receipt.swapped.reason} />
           )}
         </dd>
         <dt>orderHash</dt>
@@ -244,22 +250,22 @@ function FillReceiptView({ receipt, snapshot }: { receipt: FillReceipt; snapshot
                   {decrease ? <span className="unit">delta -{liquidityText(decrease.liquidityDelta)}</span> : null}
                 </>
               ) : (
-                <span className="unavailable">{receipt.liquidity.reason}</span>
+                <Missing reason={receipt.liquidity.reason} />
               )}
             </dd>
             <dt>released</dt>
             <dd>
               {receipt.unwound.ok ? (
                 <>
-                  {fmtAmount(receipt.unwound.value.released, decimalsOf(receipt.unwound.value.token), 6)}{' '}
+                  {fmtAmount(receipt.unwound.value.released, decimalsOf(receipt.unwound.value.token))}{' '}
                   {symbolOf(receipt.unwound.value.token)}
                   <span className="unit">
-                    against {fmtAmount(receipt.unwound.value.required, decimalsOf(receipt.unwound.value.token), 6)}{' '}
+                    against {fmtAmount(receipt.unwound.value.required, decimalsOf(receipt.unwound.value.token))}{' '}
                     owed, the surplus stays as float
                   </span>
                 </>
               ) : (
-                <span className="unavailable">{receipt.unwound.reason}</span>
+                <Missing reason={receipt.unwound.reason} />
               )}
             </dd>
           </dl>
@@ -279,7 +285,7 @@ function FillReceiptView({ receipt, snapshot }: { receipt: FillReceipt; snapshot
                   {increase ? <span className="unit">delta +{liquidityText(increase.liquidityDelta)}</span> : null}
                 </>
               ) : (
-                <span className="unavailable">{receipt.redeposited.reason}</span>
+                <Missing reason={receipt.redeposited.reason} />
               )}
             </dd>
             <dt>PoolManager</dt>
@@ -288,11 +294,11 @@ function FillReceiptView({ receipt, snapshot }: { receipt: FillReceipt; snapshot
                 <>
                   {receipt.positionCalls.length} ModifyLiquidity
                   <span className="unit">
-                    sent by {short(receipt.positionCalls[0].sender, 8, 6)}, the position manager
+                    sent by {shortAddress(receipt.positionCalls[0].sender)}, the position manager
                   </span>
                 </>
               ) : (
-                <span className="unavailable">no ModifyLiquidity event in this receipt</span>
+                <Missing reason="no ModifyLiquidity event in this receipt" />
               )}
             </dd>
           </dl>
@@ -302,7 +308,14 @@ function FillReceiptView({ receipt, snapshot }: { receipt: FillReceipt; snapshot
   )
 }
 
-export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet: Wallet }) {
+export function Dashboard({ config }: { config: AppConfig | null }) {
+  // The wallet, straight from wagmi. An account switch or a chain switch inside the extension re-renders this
+  // page through these hooks, so nothing here has to listen to a provider or ask for a reload.
+  const { address, chainId: walletChainId, status: walletStatus } = useConnection()
+  const { data: walletClient } = useWalletClient()
+  const takerAddress = (walletStatus === 'connected' ? (address as Address | undefined) : undefined) ?? null
+  const wrongChain = walletStatus === 'connected' && walletChainId !== CHAIN.id
+
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [snapshotError, setSnapshotError] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
@@ -317,17 +330,18 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
 
   const [quote, setQuote] = useState<Action<QuoteResult>>(idle)
   const [fill, setFill] = useState<Action<FillResult>>(idle)
+  const [fillTx, setFillTx] = useState<TxState>(txIdle)
   const [progress, setProgress] = useState<{ steps: FillStep[]; log: string[] }>({ steps: [], log: [] })
   const [claim, setClaim] = useState<Action<{ tx: TransactionRequest | null; payload: unknown }>>(idle)
   const [unwind, setUnwind] = useState<Action<{ tx: TransactionRequest | null; payload: unknown }>>(idle)
-  const [execution, setExecution] = useState<Action<{ hash: Hex }>>(idle)
   const [apiPool, setApiPool] = useState<Record<string, string | number> | null>(null)
 
   // The connected wallet is the taker now, so what it holds and what it has approved is part of the state
   // this page reads, and the two buttons that fix either are next to the fill.
   const [taker, setTaker] = useState<{ balance: bigint; allowance: bigint } | null>(null)
-  const [mint, setMint] = useState<Action<{ hash: Hex }>>(idle)
-  const [approval, setApproval] = useState<Action<{ hash: Hex }>>(idle)
+  const mintTx = useTx()
+  const approveTx = useTx()
+  const executeTx = useTx()
 
   const [receiptHash, setReceiptHash] = useState<Hex | null>(null)
   const [ranHere, setRanHere] = useState(false)
@@ -411,7 +425,6 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
     }
   }, [live])
 
-
   // The last fill the deployment record names, so the panel shows a real transaction before anybody presses
   // anything. A fill run from this page replaces it.
   useEffect(() => {
@@ -436,7 +449,7 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
         if (!cancelled) setReceipt({ status: 'ok', value })
       })
       .catch((error) => {
-        if (!cancelled) setReceipt({ status: 'error', message: reason(error) })
+        if (!cancelled) setReceipt({ status: 'error', message: describeError(error) })
       })
     return () => {
       cancelled = true
@@ -470,7 +483,6 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
   const router = config?.deployment.router ?? null
   const positionManager = config?.deployment.positionManager ?? config?.chain.positionManager ?? null
   const orderResult = config ? orderFrom(config.deployment) : null
-  const takerAddress = (wallet.state?.address ?? null) as Address | null
 
   /** What the connected wallet holds of the input token, and what it has approved the router for. */
   const refreshTaker = useCallback(async () => {
@@ -489,12 +501,31 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
     void refreshTaker()
   }, [refreshTaker, snapshot?.at])
 
+  // A transaction belongs to the account that signed it. Switching account or disconnecting leaves the cards
+  // from the previous one on screen, which reads as a failure that just happened, so they are cleared.
+  const mintReset = mintTx.reset
+  const approveReset = approveTx.reset
+  const executeReset = executeTx.reset
+  useEffect(() => {
+    mintReset()
+    approveReset()
+    executeReset()
+    setFillTx(txIdle)
+  }, [approveReset, executeReset, mintReset, takerAddress])
+
   const isVaultOwner =
-    wallet.state && snapshot?.vault.owner.ok
-      ? wallet.state.address.toLowerCase() === snapshot.vault.owner.value.toLowerCase()
+    takerAddress && snapshot?.vault.owner.ok
+      ? takerAddress.toLowerCase() === snapshot.vault.owner.value.toLowerCase()
       : false
 
   const slac = useMemo(() => slacOf(snapshot), [snapshot])
+  const readiness = useMemo(() => readinessOf(snapshot, snapshotError), [snapshot, snapshotError])
+  // The taker fields say the same thing three times when nothing is connected, and the subhead above them
+  // already says it once, so they render as placeholders instead.
+  const statedReasons = useMemo(
+    () => (takerAddress ? readiness.statedSet : new Set([...readiness.statedSet, NO_WALLET])),
+    [readiness.statedSet, takerAddress],
+  )
 
   /**
    * Settled volume, per input token, so a two directional book is never summed into one wrong number.
@@ -514,7 +545,7 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
       [...totals.entries()].map(([token, value]) => ({
         token: token as Address,
         value,
-        symbol: snapshot ? tokenOf(snapshot, token as Address).symbol : short(token, 6, 4),
+        symbol: snapshot ? tokenOf(snapshot, token as Address).symbol : shortAddress(token),
         decimals: snapshot ? tokenOf(snapshot, token as Address).decimals : 18,
       }))
     return { count: settled(history.fills).count, in: legs(paidIn), out: legs(paidOut) }
@@ -545,7 +576,7 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
       })
       setQuote({ status: 'ok', value })
     } catch (error) {
-      setQuote({ status: 'error', message: reason(error) })
+      setQuote({ status: 'error', message: describeError(error) })
     }
   }, [aToB, amountInput, config, inDecimals, orderResult])
 
@@ -557,13 +588,14 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
    * off the record, so they are the numbers the guards will actually enforce.
    */
   const fillInputs = useMemo(():
-    | { ok: true; value: Parameters<typeof runFill>[0] }
+    | { ok: true; value: Omit<Parameters<typeof runFill>[0], 'onEvent'> }
     | { ok: false; reason: string } => {
     if (!config || !snapshot) return { ok: false, reason: 'the chain state is still loading' }
     if (!takerAddress) return { ok: false, reason: 'connect a wallet, it is the taker and it signs the swap' }
-    if (wallet.state && wallet.state.chainId !== CHAIN.id) {
-      return { ok: false, reason: `the wallet is on chain ${wallet.state.chainId}, this book lives on Sepolia` }
+    if (wrongChain) {
+      return { ok: false, reason: `the wallet is on chain ${walletChainId}, this book lives on Sepolia` }
     }
+    if (!walletClient) return { ok: false, reason: 'the wallet client is not ready yet' }
     if (!orderResult) return { ok: false, reason: 'no deployment record yet' }
     if (!orderResult.ok) return { ok: false, reason: orderResult.reason }
     if (!router || !vaultAddress || !positionManager) return { ok: false, reason: 'no router, vault or position manager in the record' }
@@ -578,6 +610,7 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
         amount: parseUnits(amountInput || '0', inDecimals),
         isAToB: aToB,
         taker: takerAddress,
+        wallet: walletClient,
         order: orderResult.value,
         orderHash: config.deployment.strategy?.orderHash ?? config.deployment.strategyHash,
         router,
@@ -608,7 +641,9 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
     token1,
     tokenId,
     vaultAddress,
-    wallet.state,
+    walletChainId,
+    walletClient,
+    wrongChain,
   ])
 
   const onFill = useCallback(async () => {
@@ -617,7 +652,9 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
       return
     }
     setFill({ status: 'pending' })
+    setFillTx(fillInputs.value.dry ? txIdle : { status: 'signing' })
     setProgress({ steps: [], log: [] })
+    let sent: Hex | null = null
     try {
       const value = await runFill({
         ...fillInputs.value,
@@ -631,9 +668,21 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
           if (event.type === 'log') {
             setProgress((current) => ({ ...current, log: [...current.log, event.line].slice(-400) }))
           }
+          if (event.type === 'sent') {
+            sent = event.hash
+            setFillTx({ status: 'pending', hash: event.hash })
+          }
         },
       })
       setFill({ status: 'ok', value })
+      if (value.transactionHash && value.blockNumber !== null && value.gasUsed !== null) {
+        setFillTx({
+          status: 'confirmed',
+          hash: value.transactionHash,
+          blockNumber: value.blockNumber,
+          gasUsed: value.gasUsed,
+        })
+      }
       if (value.transactionHash) {
         setReceiptHash(value.transactionHash)
         setRanHere(true)
@@ -642,39 +691,29 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
       void scanHistory()
       void refreshTaker()
     } catch (error) {
-      setFill({ status: 'error', message: reason(error) })
+      const message = describeError(error)
+      setFill({ status: 'error', message })
+      setFillTx({ status: 'failed', hash: sent, message })
     }
   }, [fillInputs, refresh, refreshTaker, scanHistory])
 
   /** `TestERC20.mint` is public, which is what lets a judge drive the demo without asking anyone for tokens. */
-  const onMint = useCallback(async () => {
-    if (!takerAddress || !tokenIn) return
-    setMint({ status: 'pending' })
-    try {
-      const hash = await mintTo({ token: tokenIn, taker: takerAddress, amount: MINT_AMOUNT })
-      setMint({ status: 'ok', value: { hash } })
-      await publicClient.waitForTransactionReceipt({ hash })
-      void refreshTaker()
-    } catch (error) {
-      setMint({ status: 'error', message: reason(error) })
-    }
-  }, [refreshTaker, takerAddress, tokenIn])
+  const onMint = useCallback(() => {
+    if (!takerAddress || !tokenIn || !walletClient) return
+    void mintTx.send(() => mintTo({ wallet: walletClient, token: tokenIn, taker: takerAddress, amount: MINT_AMOUNT }), {
+      onConfirmed: () => void refreshTaker(),
+    })
+  }, [mintTx, refreshTaker, takerAddress, tokenIn, walletClient])
 
-  const onApprove = useCallback(async () => {
-    if (!takerAddress || !tokenIn || !router) return
-    setApproval({ status: 'pending' })
-    try {
-      const hash = await approveRouter({ token: tokenIn, taker: takerAddress, router })
-      setApproval({ status: 'ok', value: { hash } })
-      await publicClient.waitForTransactionReceipt({ hash })
-      void refreshTaker()
-    } catch (error) {
-      setApproval({ status: 'error', message: reason(error) })
-    }
-  }, [refreshTaker, router, takerAddress, tokenIn])
+  const onApprove = useCallback(() => {
+    if (!takerAddress || !tokenIn || !router || !walletClient) return
+    void approveTx.send(() => approveRouter({ wallet: walletClient, token: tokenIn, taker: takerAddress, router }), {
+      onConfirmed: () => void refreshTaker(),
+    })
+  }, [approveTx, refreshTaker, router, takerAddress, tokenIn, walletClient])
 
   const onClaimFees = useCallback(async () => {
-    if (!vaultAddress) return
+    if (!vaultAddress || !snapshot) return
     if (tokenId === null) {
       setClaim({
         status: 'error',
@@ -683,9 +722,9 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
       return
     }
     setClaim({ status: 'pending' })
-    setExecution(idle)
+    executeTx.reset()
     try {
-      const key = snapshot!.vault.keyUsed
+      const key = snapshot.vault.keyUsed
       const { payload } = await claimFees({
         chainId,
         walletAddress: vaultAddress,
@@ -695,9 +734,9 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
       })
       setClaim({ status: 'ok', value: { tx: findTransactionRequest(payload), payload } })
     } catch (error) {
-      setClaim({ status: 'error', message: reason(error) })
+      setClaim({ status: 'error', message: describeError(error) })
     }
-  }, [chainId, snapshot, tokenId, vaultAddress])
+  }, [chainId, executeTx, snapshot, tokenId, vaultAddress])
 
   const onUnwindCalldata = useCallback(async () => {
     if (!vaultAddress || !snapshot) return
@@ -719,30 +758,26 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
       })
       setUnwind({ status: 'ok', value: { tx: findTransactionRequest(payload), payload } })
     } catch (error) {
-      setUnwind({ status: 'error', message: reason(error) })
+      setUnwind({ status: 'error', message: describeError(error) })
     }
   }, [chainId, snapshot, tokenId, vaultAddress])
 
-  const onExecuteClaim = useCallback(async () => {
-    if (claim.status !== 'ok' || !claim.value.tx || !vaultAddress || !wallet.state) return
-    setExecution({ status: 'pending' })
-    try {
-      const client = walletClientFor(wallet.state.address as Address)
-      const hash = await client.writeContract({
-        account: wallet.state.address as Address,
-        chain: CHAIN,
-        address: vaultAddress,
-        abi: vaultAbi,
-        functionName: 'executeOnPositionManager',
-        args: [claim.value.tx.data as Hex, 0n],
-      })
-      setExecution({ status: 'ok', value: { hash } })
-      await publicClient.waitForTransactionReceipt({ hash })
-      void refresh()
-    } catch (error) {
-      setExecution({ status: 'error', message: reason(error) })
-    }
-  }, [claim, refresh, vaultAddress, wallet.state])
+  const onExecuteClaim = useCallback(() => {
+    if (claim.status !== 'ok' || !claim.value.tx || !vaultAddress || !takerAddress || !walletClient) return
+    const data = claim.value.tx.data as Hex
+    void executeTx.send(
+      () =>
+        walletClient.writeContract({
+          account: takerAddress,
+          chain: CHAIN,
+          address: vaultAddress,
+          abi: vaultAbi,
+          functionName: 'executeOnPositionManager',
+          args: [data, 0n],
+        }),
+      { onConfirmed: () => void refresh() },
+    )
+  }, [claim, executeTx, refresh, takerAddress, vaultAddress, walletClient])
 
   const quoteDisabledReason = !config
     ? 'the address files are still loading'
@@ -766,488 +801,496 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
   const liveStrategyHash = config?.deployment.strategy?.orderHash ?? config?.deployment.strategyHash ?? null
 
   return (
-    <div className="wrap dash">
-      {snapshotError ? <div className="banner bad">state could not be read: {snapshotError}</div> : null}
-      {config?.problems.length ? <div className="banner">{config.problems.join(' , ')}</div> : null}
-
-      <div className="actionbar">
-        <div>
-          <label className="field-label" htmlFor="amount">
-            amount in, {inSymbol}
-          </label>
-          <input
-            id="amount"
-            className="input"
-            style={{ width: 130 }}
-            value={amountInput}
-            onChange={(event) => setAmountInput(event.target.value)}
-            inputMode="decimal"
-          />
-        </div>
-        <div>
-          <label className="field-label" htmlFor="direction">
-            direction
-          </label>
-          <select
-            id="direction"
-            className="select"
-            value={aToB ? 'ab' : 'ba'}
-            onChange={(event) => setAToB(event.target.value === 'ab')}
-          >
-            <option value="ab">
-              {symbol0} to {symbol1}
-            </option>
-            <option value="ba">
-              {symbol1} to {symbol0}
-            </option>
-          </select>
-        </div>
-
-        <button className="btn" onClick={() => void refresh({ withApi: true })} disabled={refreshing || !config}>
-          {refreshing ? 'reading' : 'Refresh state'}
-        </button>
-        <button
-          className="btn"
-          onClick={() => void onQuote()}
-          disabled={quote.status === 'pending' || Boolean(quoteDisabledReason)}
-          title={quoteDisabledReason ?? 'staticcall on quote(), instruction 0x92 runs inside it'}
-        >
-          Request a quote
-        </button>
-        <button
-          className="btn primary"
-          onClick={() => void onFill()}
-          disabled={fill.status === 'pending' || !fillInputs.ok}
-          title={
-            fillInputs.ok
-              ? 'quote, size, /lp/decrease, /lp/increase, taker traits, swap(). All of it in this tab, signed by the connected wallet'
-              : fillInputs.reason
-          }
-        >
-          {fill.status === 'pending' ? 'filling' : dryRun ? 'Run a fill, dry' : 'Run a fill'}
-        </button>
-        <label className="toggle" title="simulate against live state and broadcast nothing, yarn fill --dry">
-          <input type="checkbox" checked={dryRun} onChange={(event) => setDryRun(event.target.checked)} />
-          dry
-        </label>
-        <button
-          className="btn"
-          onClick={() => void onMint()}
-          disabled={mint.status === 'pending' || !takerAddress || !tokenIn}
-          title={
-            takerAddress
-              ? `TestERC20.mint is public, this mints ${fmtAmount(MINT_AMOUNT, inDecimals, 0)} ${inSymbol} to your wallet`
-              : 'connect a wallet first, the tokens are minted to it'
-          }
-        >
-          {mint.status === 'pending' ? 'minting' : `Mint ${inSymbol}`}
-        </button>
-        <button
-          className="btn"
-          onClick={() => void onApprove()}
-          disabled={approval.status === 'pending' || !takerAddress || !tokenIn || !router}
-          title={
-            takerAddress
-              ? 'approves the router, not Aqua: useTransferFromAndAquaPush makes the router push on your behalf'
-              : 'connect a wallet first'
-          }
-        >
-          {approval.status === 'pending' ? 'approving' : 'Approve the router'}
-        </button>
-        <button className="btn" onClick={() => void onClaimFees()} disabled={claim.status === 'pending'}>
-          Claim fees
-        </button>
-
-        <div className="spacer" />
-        <label className="toggle">
-          <input type="checkbox" checked={live} onChange={(event) => setLive(event.target.checked)} />
-          auto refresh, 5 s
-        </label>
-        <span
-          className={fillInputs.ok ? 'chip' : 'chip warn'}
-          title={fillInputs.ok ? 'the fill runs here, signed by this wallet' : fillInputs.reason}
-        >
-          <span className="led" /> taker {takerAddress ? short(takerAddress, 6, 4) : 'not connected'}
-        </span>
-        <span className="chip" title="block the last read was answered at">
-          <span className="led" />
-          <Show result={snapshot?.blockNumber ?? notRead}>{(value) => <>block {integer(value)}</>}</Show>
-        </span>
-        {snapshot ? <span className="chip">{ago(snapshot.at)}</span> : null}
-      </div>
-
-      {/* the two figures ---------------------------------------------------- */}
-      <section className="headline">
-        <Figure
-          label="settled through this maker"
-          note="Swapped events on the router, summed per input token"
-          sub={
-            volume
-              ? `${volume.count} ${volume.count === 1 ? 'fill' : 'fills'}, paid back out: ${volume.out
-                  .map((leg) => `${fmtAmount(leg.value, leg.decimals, 2)} ${leg.symbol}`)
-                  .join(' , ') || 'nothing yet'}`
-              : 'reading the logs'
-          }
-        >
-          {volume && volume.in.length ? (
-            volume.in.map((leg) => (
-              <div key={leg.token}>
-                <span className="num">{fmtAmount(leg.value, leg.decimals, 2)}</span> <Unit>{leg.symbol}</Unit>
-              </div>
-            ))
-          ) : history ? (
-            <>
-              <span className="unavailable">no fill in the scanned window</span>
-              <span className="why">
-                scanned back to block {history.scannedFrom.toString()} over {history.chunks} range
-                {history.chunks === 1 ? '' : 's'}
+    <StatedReasonsProvider value={statedReasons}>
+      <div className="wrap dash">
+        {/* one state at the top, and it is not the same shape as an error ------ */}
+        {readiness.phase === 'loading' ? (
+          <div className="banner loading">
+            <span className="led pulse" />
+            reading Ethereum Sepolia. Nothing on this page is cached, so every field below is waiting on its
+            first answer.
+          </div>
+        ) : null}
+        {readiness.phase === 'failed' ? (
+          <div className="banner bad">
+            the chain state could not be read: {snapshotError}. The fields below are the last thing this page
+            knew, or nothing at all.
+          </div>
+        ) : null}
+        {readiness.stated.map((entry) => (
+          <div className="banner" key={entry.reason}>
+            {entry.reason}
+            {entry.fields ? (
+              <span className="faint">
+                {' '}
+                , {entry.fields} field{entry.fields === 1 ? '' : 's'} below are waiting on it
               </span>
-            </>
-          ) : (
-            <span className="unavailable">reading</span>
-          )}
-        </Figure>
+            ) : null}
+          </div>
+        ))}
+        {config?.problems.length ? <div className="banner">{config.problems.join(' , ')}</div> : null}
 
-        <Figure
-          label="the float that backed it"
-          note="balanceOf the vault, both tokens, right now"
-          sub={
-            snapshot?.vault.floatA.ok && snapshot.vault.floatB.ok
-              ? `${fmtAmount(snapshot.vault.floatA.value, decimalsA, 2)} ${symbolA} , ${fmtAmount(snapshot.vault.floatB.value, decimalsB, 2)} ${symbolB}`
-              : 'not read yet'
-          }
-        >
-          <Show result={float}>
-            {(value) => (
-              <>
-                <span className="num">{fmtAmount(value, 18, 2)}</span> <Unit>tokens</Unit>
-              </>
-            )}
-          </Show>
-        </Figure>
+        <div className="actionbar">
+          <div>
+            <label className="field-label" htmlFor="amount">
+              amount in, {inSymbol}
+            </label>
+            <input
+              id="amount"
+              className="input"
+              style={{ width: 130 }}
+              value={amountInput}
+              onChange={(event) => setAmountInput(event.target.value)}
+              inputMode="decimal"
+            />
+          </div>
+          <div>
+            <label className="field-label" htmlFor="direction">
+              direction
+            </label>
+            <select
+              id="direction"
+              className="select"
+              value={aToB ? 'ab' : 'ba'}
+              onChange={(event) => setAToB(event.target.value === 'ab')}
+            >
+              <option value="ab">
+                {symbol0} to {symbol1}
+              </option>
+              <option value="ba">
+                {symbol1} to {symbol0}
+              </option>
+            </select>
+          </div>
 
-        <div className="headline-note">
-          The number on the right is what a wallet balance check sees. The volume on the left went through that
-          same wallet anyway, because the inventory sits in a Uniswap v4 position and is unwound one instruction
-          before the tokens leave, inside the transaction that pays them out.
-        </div>
-      </section>
-
-      {/* SLAC --------------------------------------------------------------- */}
-      <section className="slac">
-        <div className="slac-head">
-          <h3>SLAC</h3>
-          <span className="faint">
-            the Shared Liquidity Amplification Coefficient, 1inch's own metric, Aqua whitepaper page 4: total
-            liquidity provisioned across all strategies over the wallet equity backing it
-          </span>
-        </div>
-        <div className="slac-grid">
-          <SlacCard
-            title="against bare wallet equity"
-            denominator="ERC20 balanceOf on the vault, both tokens"
-            numerator={slac.numerator}
-            leg={slac.bare}
-            strategies={snapshot?.aqua.strategies.length ?? 0}
-          />
-          <SlacCard
-            title="against reachable equity"
-            denominator="free float plus vault.reachableFromPosition(), counted once"
-            numerator={slac.numerator}
-            leg={slac.reachable}
-            strategies={snapshot?.aqua.strategies.length ?? 0}
-          />
-        </div>
-        <p className="slac-foot">
-          The second denominator is what the custom instruction measures on chain. reachableFromPosition() is the
-          position's liquidity valued at the maker's own conversion factor, capped at maxUnwindPct and cut by the
-          haircut, and instruction 0x92 clamps every quote to the free float plus that figure inside the VM. The
-          first denominator is the one a wallet balance check would use, which is why it reads as amplification
-          that cannot exist: the inventory it is looking for is deployed, not missing.
-        </p>
-      </section>
-
-      <div className="results">
-        <ResultCard title="quote" state={quote}>
-          {quote.status === 'ok' ? (
-            <dl className="kv">
-              <dt>amountIn</dt>
-              <dd>
-                {fmtAmount(quote.value.amountIn, inDecimals, 6)} {inSymbol}
-              </dd>
-              <dt>amountOut</dt>
-              <dd>
-                {fmtAmount(quote.value.amountOut, outDecimals, 6)} {outSymbol}
-              </dd>
-              <dt>orderHash</dt>
-              <dd>{quote.value.orderHash}</dd>
-              <dt>takerTraits</dt>
-              <dd>{quote.value.takerTraitsAndData}</dd>
-              <dt>raw</dt>
-              <dd className="faint">
-                {quote.value.amountIn.toString()} in, {quote.value.amountOut.toString()} out, read through a
-                staticcall on quote()
-              </dd>
-            </dl>
-          ) : null}
-        </ResultCard>
-
-        {fill.status !== 'idle' ? (
-          <div
-            className={
-              fill.status === 'ok' ? 'result ok' : fill.status === 'error' ? 'result error' : 'result pending'
+          <button className="btn" onClick={() => void refresh({ withApi: true })} disabled={refreshing || !config}>
+            {refreshing ? 'reading' : 'Refresh state'}
+          </button>
+          <button
+            className="btn"
+            onClick={() => void onQuote()}
+            disabled={quote.status === 'pending' || Boolean(quoteDisabledReason)}
+            title={quoteDisabledReason ?? 'staticcall on quote(), instruction 0x92 runs inside it'}
+          >
+            Request a quote
+          </button>
+          <button
+            className="btn primary"
+            onClick={() => void onFill()}
+            disabled={fill.status === 'pending' || !fillInputs.ok}
+            title={
+              fillInputs.ok
+                ? 'quote, size, /lp/decrease, /lp/increase, taker traits, swap(). All of it in this tab, signed by the connected wallet'
+                : fillInputs.reason
             }
           >
-            <h4>fill</h4>
-            {progress.steps.length ? (
-              <ol className="steps">
-                {progress.steps.map((step) => (
-                  <li key={`${step.index}-${step.at}`}>
-                    <span className="num">{step.index}</span> {step.label}
-                  </li>
-                ))}
-              </ol>
-            ) : null}
-            {fill.status === 'pending' ? (
-              <div className="muted">
-                running in this tab: a quote through a staticcall, two Uniswap API calls, the taker traits built
-                by solver/src/takerTraits.ts, then swap() signed by the connected wallet.
-              </div>
-            ) : null}
-            {fill.status === 'error' ? (
-              <div className="mono" style={{ overflowWrap: 'anywhere' }}>
-                {fill.message}
-              </div>
-            ) : null}
-            {fill.status === 'ok' ? (
-              <dl className="kv">
-                <dt>{fill.value.dry ? 'simulated' : 'transaction'}</dt>
-                <dd>
-                  {fill.value.transactionHash ? (
-                    <a href={txUrl(fill.value.transactionHash)} target="_blank" rel="noreferrer">
-                      {fill.value.transactionHash}
-                    </a>
-                  ) : (
-                    <span className="faint">
-                      dry run, nothing was broadcast. The same press with the dry box clear sends it.
-                    </span>
-                  )}
-                </dd>
-                <dt>quoted</dt>
-                <dd>
-                  {fmtAmount(fill.value.amountIn, inDecimals, 6)} {inSymbol} in,{' '}
-                  {fmtAmount(fill.value.amountOut, outDecimals, 6)} {outSymbol} out
-                </dd>
-                <dt>unwind</dt>
-                <dd>
-                  {fill.value.unwindPercent} percent of the position
-                  <span className="unit">rounded up, liquidityPercentageToDecrease is an integer</span>
-                </dd>
-                <dt>signed by</dt>
-                <dd>
-                  <Addr value={fill.value.taker} length={10} />
-                  <span className="unit">
-                    the connected wallet is the taker, and the router pulls the input from it
-                  </span>
-                </dd>
-                <dt>takerTraits</dt>
-                <dd>
-                  {(fill.value.takerTraitsAndData.length - 2) / 2} bytes
-                  <span className="unit">
-                    22 of header, then the threshold, the /lp/increase payload and the /lp/decrease payload.
-                    Built by solver/src/takerTraits.ts, proved against TakerTraitsLib.build in
-                    contracts/test/TakerTraits.t.sol
-                  </span>
-                </dd>
-              </dl>
-            ) : null}
-            {progress.log.length ? (
-              <details style={{ marginTop: 10 }}>
-                <summary className="faint">what the fill worked out, {progress.log.length} lines</summary>
-                <pre className="json">{progress.log.join('\n')}</pre>
-              </details>
-            ) : null}
+            {fill.status === 'pending' ? 'filling' : dryRun ? 'Run a fill, dry' : 'Run a fill'}
+          </button>
+          <label className="toggle" title="simulate against live state and broadcast nothing, yarn fill --dry">
+            <input type="checkbox" checked={dryRun} onChange={(event) => setDryRun(event.target.checked)} />
+            dry
+          </label>
+          <button
+            className="btn"
+            onClick={onMint}
+            disabled={mintTx.busy || !takerAddress || !tokenIn || !walletClient || wrongChain}
+            title={
+              takerAddress
+                ? `TestERC20.mint is public, this mints ${fmtAmount(MINT_AMOUNT, inDecimals, 0)} ${inSymbol} to your wallet`
+                : 'connect a wallet first, the tokens are minted to it'
+            }
+          >
+            {mintTx.state.status === 'signing'
+              ? 'confirm in wallet'
+              : mintTx.state.status === 'pending'
+                ? 'minting'
+                : `Mint ${inSymbol}`}
+          </button>
+          <button
+            className="btn"
+            onClick={onApprove}
+            disabled={approveTx.busy || !takerAddress || !tokenIn || !router || !walletClient || wrongChain}
+            title={
+              takerAddress
+                ? 'approves the router, not Aqua: useTransferFromAndAquaPush makes the router push on your behalf'
+                : 'connect a wallet first'
+            }
+          >
+            {approveTx.state.status === 'signing'
+              ? 'confirm in wallet'
+              : approveTx.state.status === 'pending'
+                ? 'approving'
+                : 'Approve the router'}
+          </button>
+          <button className="btn" onClick={() => void onClaimFees()} disabled={claim.status === 'pending'}>
+            Claim fees
+          </button>
+
+          <div className="spacer" />
+          <label className="toggle">
+            <input type="checkbox" checked={live} onChange={(event) => setLive(event.target.checked)} />
+            auto refresh, 5 s
+          </label>
+        </div>
+
+        {fillInputs.ok ? null : (
+          <div className="actionbar-note">
+            the fill is not armed: {fillInputs.reason}
+          </div>
+        )}
+        {mintTx.state.status !== 'idle' || approveTx.state.status !== 'idle' || fillTx.status !== 'idle' ? (
+          <div className="txbar">
+            <TxStatus state={fillTx} label="swap()" />
+            <TxStatus state={mintTx.state} label="mint" />
+            <TxStatus state={approveTx.state} label="approve" />
           </div>
         ) : null}
 
-        <ResultCard
-          title={ranHere ? 'the fill, read back from its receipt' : 'the last fill on this vault, from its receipt'}
-          state={receipt}
-        >
-          {receipt.status === 'ok' ? <FillReceiptView receipt={receipt.value} snapshot={snapshot} /> : null}
-        </ResultCard>
+        {/* the two figures ---------------------------------------------------- */}
+        <section className="headline">
+          <Figure
+            label="settled through this maker"
+            note="Swapped events on the router, summed per input token"
+            sub={
+              volume
+                ? `${volume.count} ${volume.count === 1 ? 'fill' : 'fills'}, paid back out: ${volume.out
+                    .map((leg) => `${fmtAmount(leg.value, leg.decimals)} ${leg.symbol}`)
+                    .join(' , ') || 'nothing yet'}`
+                : 'reading the logs'
+            }
+          >
+            {volume && volume.in.length ? (
+              volume.in.map((leg) => (
+                <div key={leg.token}>
+                  <Num>{fmtAmount(leg.value, leg.decimals)}</Num> <Unit>{leg.symbol}</Unit>
+                </div>
+              ))
+            ) : history ? (
+              <>
+                <span className="unavailable">no fill in the scanned window</span>
+                <span className="why">
+                  scanned back to block {integer(history.scannedFrom)} over {history.chunks} range
+                  {history.chunks === 1 ? '' : 's'}
+                </span>
+              </>
+            ) : (
+              <span className="placeholder">····</span>
+            )}
+          </Figure>
 
-        <ResultCard title="claim fees, /lp/claim_fees" state={claim}>
-          {claim.status === 'ok' ? (
-            <>
-              <TxRequestView tx={claim.value.tx} expected={positionManager} />
-              <div style={{ marginTop: 10, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-                <button
-                  className="btn small"
-                  onClick={() => void onExecuteClaim()}
-                  disabled={!claim.value.tx || !isVaultOwner || execution.status === 'pending'}
-                  title={
-                    isVaultOwner
-                      ? 'sends vault.executeOnPositionManager with the calldata the API built'
-                      : 'executeOnPositionManager is onlyOwner, so this needs the vault owner in the wallet'
-                  }
-                >
-                  Execute through the vault
-                </button>
-                {!isVaultOwner ? (
-                  <span className="faint">
-                    the connected wallet is not the vault owner, so the vault would reject the call
-                  </span>
-                ) : null}
-                {execution.status === 'ok' ? (
-                  <a href={txUrl(execution.value.hash)} target="_blank" rel="noreferrer" className="mono">
-                    {short(execution.value.hash, 10, 8)}
-                  </a>
-                ) : null}
-                {execution.status === 'error' ? <span className="unavailable">{execution.message}</span> : null}
-              </div>
-              <details style={{ marginTop: 10 }}>
-                <summary className="faint">raw response</summary>
-                <pre className="json">{stringify(claim.value.payload)}</pre>
-              </details>
-            </>
-          ) : null}
-        </ResultCard>
-
-        <ResultCard title="unwind calldata, /lp/decrease" state={unwind}>
-          {unwind.status === 'ok' ? (
-            <>
-              <p className="muted" style={{ marginBottom: 8 }}>
-                This is the payload that goes verbatim into the preTransferOutHookData slice of the taker traits
-                and is executed by the vault one instruction before the tokens leave.
-              </p>
-              <TxRequestView tx={unwind.value.tx} expected={positionManager} />
-            </>
-          ) : null}
-        </ResultCard>
-      </div>
-
-      <div className="columns">
-        <section className="column uniswap">
-          <div className="column-head">
-            <h3>Uniswap v4 position</h3>
-            <span className="who">
-              {positionManager ? <Addr value={positionManager} /> : <span className="unavailable">no manager</span>}
-            </span>
-          </div>
-          <div className="column-body">
-            <Metric label="tokenId" note={snapshot?.uniswap.tokenIdSource ?? undefined} big>
-              {tokenId === null ? (
+          <Figure
+            label="the float that backed it"
+            note="balanceOf the vault, both tokens, right now"
+            sub={
+              snapshot?.vault.floatA.ok && snapshot.vault.floatB.ok
+                ? `${fmtAmount(snapshot.vault.floatA.value, decimalsA)} ${symbolA} , ${fmtAmount(snapshot.vault.floatB.value, decimalsB)} ${symbolB}`
+                : ''
+            }
+          >
+            <Show result={float}>
+              {(value) => (
                 <>
-                  <span className="unavailable">unavailable</span>
-                  <span className="why">
-                    the position does not exist yet. The setup script creates it through the Uniswap API and hands
-                    it to the vault.
-                  </span>
+                  <Num>{fmtAmount(value)}</Num> <Unit>tokens</Unit>
                 </>
-              ) : (
-                <span className="num">{tokenId.toString()}</span>
               )}
-            </Metric>
-            <Metric label="live liquidity" note="getPositionLiquidity(uint256), 0x1efeed33" big>
+            </Show>
+          </Figure>
+
+          <div className="headline-note">
+            The number on the right is what a wallet balance check sees. The volume on the left went through that
+            same wallet anyway, because the inventory sits in a Uniswap v4 position and is unwound one instruction
+            before the tokens leave, inside the transaction that pays them out.
+          </div>
+        </section>
+
+        {/* SLAC --------------------------------------------------------------- */}
+        <Panel
+          accent="aqua"
+          title="SLAC"
+          note="the Shared Liquidity Amplification Coefficient, 1inch's own metric, Aqua whitepaper page 4: total liquidity provisioned across all strategies over the wallet equity backing it"
+          foot={
+            <p className="prose">
+              The second denominator is what the custom instruction measures on chain. reachableFromPosition() is
+              the position's liquidity valued at the maker's own conversion factor, capped at maxUnwindPct and cut
+              by the haircut, and instruction 0x92 clamps every quote to the free float plus that figure inside
+              the VM. The first denominator is the one a wallet balance check would use, which is why it reads as
+              amplification that cannot exist: the inventory it is looking for is deployed, not missing.
+            </p>
+          }
+        >
+          <div className="slac-grid">
+            <SlacCard
+              title="against bare wallet equity"
+              denominator="ERC20 balanceOf on the vault, both tokens"
+              numerator={slac.numerator}
+              leg={slac.bare}
+              strategies={snapshot?.aqua.strategies.length ?? 0}
+            />
+            <SlacCard
+              title="against reachable equity"
+              denominator="free float plus vault.reachableFromPosition(), counted once"
+              numerator={slac.numerator}
+              leg={slac.reachable}
+              strategies={snapshot?.aqua.strategies.length ?? 0}
+            />
+          </div>
+        </Panel>
+
+        <div className="results">
+          <ResultPanel title="quote" state={quote}>
+            {quote.status === 'ok' ? (
+              <dl className="kv">
+                <dt>amountIn</dt>
+                <dd>
+                  {exact(quote.value.amountIn, inDecimals)} {inSymbol}
+                </dd>
+                <dt>amountOut</dt>
+                <dd>
+                  {exact(quote.value.amountOut, outDecimals)} {outSymbol}
+                </dd>
+                <dt>orderHash</dt>
+                <dd>{quote.value.orderHash}</dd>
+                <dt>takerTraits</dt>
+                <dd>{quote.value.takerTraitsAndData}</dd>
+                <dt>raw</dt>
+                <dd className="faint">
+                  {quote.value.amountIn.toString()} in, {quote.value.amountOut.toString()} out, read through a
+                  staticcall on quote()
+                </dd>
+              </dl>
+            ) : null}
+          </ResultPanel>
+
+          {fill.status !== 'idle' ? (
+            <Panel
+              accent={fill.status === 'ok' ? 'ok' : fill.status === 'error' ? 'bad' : 'pending'}
+              title="fill"
+              meta={<TxStatus state={fillTx} />}
+            >
+              {progress.steps.length ? (
+                <ol className="steps">
+                  {progress.steps.map((step) => (
+                    <li key={`${step.index}-${step.at}`}>
+                      <span className="num">{step.index}</span> {step.label}
+                    </li>
+                  ))}
+                </ol>
+              ) : null}
+              {fill.status === 'pending' ? (
+                <div className="muted">
+                  running in this tab: a quote through a staticcall, two Uniswap API calls, the taker traits built
+                  by solver/src/takerTraits.ts, then swap() signed by the connected wallet.
+                </div>
+              ) : null}
+              {fill.status === 'error' ? <div className="failure mono">{fill.message}</div> : null}
+              {fill.status === 'ok' ? (
+                <dl className="kv">
+                  <dt>{fill.value.dry ? 'simulated' : 'transaction'}</dt>
+                  <dd>
+                    {fill.value.transactionHash ? (
+                      <TxLink hash={fill.value.transactionHash} />
+                    ) : (
+                      <span className="faint">
+                        dry run, nothing was broadcast. The same press with the dry box clear sends it.
+                      </span>
+                    )}
+                  </dd>
+                  <dt>quoted</dt>
+                  <dd>
+                    {exact(fill.value.amountIn, inDecimals)} {inSymbol} in, {exact(fill.value.amountOut, outDecimals)}{' '}
+                    {outSymbol} out
+                  </dd>
+                  <dt>unwind</dt>
+                  <dd>
+                    {fill.value.unwindPercent} percent of the position
+                    <span className="unit">rounded up, liquidityPercentageToDecrease is an integer</span>
+                  </dd>
+                  <dt>signed by</dt>
+                  <dd>
+                    <Addr value={fill.value.taker} />
+                    <span className="unit">
+                      the connected wallet is the taker, and the router pulls the input from it
+                    </span>
+                  </dd>
+                  <dt>takerTraits</dt>
+                  <dd>
+                    {(fill.value.takerTraitsAndData.length - 2) / 2} bytes
+                    <span className="unit">
+                      22 of header, then the threshold, the /lp/increase payload and the /lp/decrease payload.
+                      Built by solver/src/takerTraits.ts, proved against TakerTraitsLib.build in
+                      contracts/test/TakerTraits.t.sol
+                    </span>
+                  </dd>
+                </dl>
+              ) : null}
+              {progress.log.length ? (
+                <details style={{ marginTop: 10 }}>
+                  <summary className="faint">what the fill worked out, {progress.log.length} lines</summary>
+                  <pre className="json">{progress.log.join('\n')}</pre>
+                </details>
+              ) : null}
+            </Panel>
+          ) : null}
+
+          <ResultPanel
+            title={ranHere ? 'the fill, read back from its receipt' : 'the last fill on this vault, from its receipt'}
+            state={receipt}
+          >
+            {receipt.status === 'ok' ? <FillReceiptView receipt={receipt.value} snapshot={snapshot} /> : null}
+          </ResultPanel>
+
+          <ResultPanel title="claim fees, /lp/claim_fees" state={claim}>
+            {claim.status === 'ok' ? (
+              <>
+                <TxRequestView tx={claim.value.tx} expected={positionManager} />
+                <div className="row" style={{ marginTop: 10 }}>
+                  <button
+                    className="btn small"
+                    onClick={onExecuteClaim}
+                    disabled={!claim.value.tx || !isVaultOwner || executeTx.busy || !walletClient}
+                    title={
+                      isVaultOwner
+                        ? 'sends vault.executeOnPositionManager with the calldata the API built'
+                        : 'executeOnPositionManager is onlyOwner, so this needs the vault owner in the wallet'
+                    }
+                  >
+                    Execute through the vault
+                  </button>
+                  {!isVaultOwner ? (
+                    <span className="faint">
+                      the connected wallet is not the vault owner, so the vault would reject the call
+                    </span>
+                  ) : null}
+                </div>
+                <TxStatus state={executeTx.state} label="executeOnPositionManager" />
+                <details style={{ marginTop: 10 }}>
+                  <summary className="faint">raw response</summary>
+                  <pre className="json">{stringify(claim.value.payload)}</pre>
+                </details>
+              </>
+            ) : null}
+          </ResultPanel>
+
+          <ResultPanel title="unwind calldata, /lp/decrease" state={unwind}>
+            {unwind.status === 'ok' ? (
+              <>
+                <p className="muted" style={{ marginBottom: 8 }}>
+                  This is the payload that goes verbatim into the preTransferOutHookData slice of the taker traits
+                  and is executed by the vault one instruction before the tokens leave.
+                </p>
+                <TxRequestView tx={unwind.value.tx} expected={positionManager} />
+              </>
+            ) : null}
+          </ResultPanel>
+        </div>
+
+        <div className="columns">
+          <Panel
+            accent="uniswap"
+            title="Uniswap v4 position"
+            meta={
+              positionManager ? <Addr value={positionManager} /> : <Missing reason="no position manager address" />
+            }
+            foot={
+              <div className="row">
+                <button className="btn small" onClick={() => void onUnwindCalldata()} disabled={unwind.status === 'pending'}>
+                  Build unwind calldata
+                </button>
+                <span className="faint">calls /lp/decrease for real</span>
+              </div>
+            }
+          >
+            <Field label="tokenId" note={snapshot?.uniswap.tokenIdSource ?? undefined} size="lead">
+              {tokenId === null ? (
+                <Missing reason="the position does not exist yet, the setup script creates it through the Uniswap API and hands it to the vault" />
+              ) : (
+                <Num>{tokenId.toString()}</Num>
+              )}
+            </Field>
+            <Field label="live liquidity" note="getPositionLiquidity(uint256), 0x1efeed33" size="lead">
               <Show result={snapshot?.uniswap.liquidity ?? notRead}>
-                {(value) => (
-                  <span className="num" title={`${value.toString()} raw`}>
-                    {liquidityText(value)}
-                  </span>
-                )}
+                {(value) => <Num title={`${value.toString()} raw`}>{liquidityText(value)}</Num>}
               </Show>
-            </Metric>
-            <Metric label="current tick" note="StateView.getSlot0">
-              <Show result={snapshot?.uniswap.tick ?? notRead}>{(value) => <span className="num">{value}</span>}</Show>
-            </Metric>
-            <Metric label="tick bounds" note="getPoolAndPositionInfo, the position's own range">
+            </Field>
+            {/* Ticks and fee tiers are parameters, not quantities, so they keep their digits ungrouped. */}
+            <Field label="current tick" note="StateView.getSlot0">
+              <Show result={snapshot?.uniswap.tick ?? notRead}>{(value) => <Num>{value}</Num>}</Show>
+            </Field>
+            <Field label="tick bounds" note="getPoolAndPositionInfo, the position's own range">
               {snapshot?.uniswap.tickLower.ok && snapshot.uniswap.tickUpper.ok ? (
-                <span className="num">
-                  {snapshot.uniswap.tickLower.value} to {snapshot.uniswap.tickUpper.value}
+                <>
+                  <Num>
+                    {snapshot.uniswap.tickLower.value} to {snapshot.uniswap.tickUpper.value}
+                  </Num>
                   <Unit>
                     {snapshot.uniswap.tickLower.value <= -887220 && snapshot.uniswap.tickUpper.value >= 887220
                       ? 'full range'
                       : 'bounded'}
                   </Unit>
-                </span>
+                </>
               ) : (
-                <Show result={snapshot?.uniswap.tickLower ?? notRead}>
-                  {(value) => <span className="num">{value}</span>}
-                </Show>
+                <Show result={snapshot?.uniswap.tickLower ?? notRead}>{(value) => <Num>{value}</Num>}</Show>
               )}
-            </Metric>
-            <Metric label="fee tier" note="the pool key the position was opened on">
+            </Field>
+            <Field label="fee tier" note="the pool key the position was opened on">
               {snapshot ? (
-                <span className="num">
-                  {snapshot.vault.keyUsed.fee}
+                <>
+                  <Num>{snapshot.vault.keyUsed.fee}</Num>
                   <Unit>
                     {(snapshot.vault.keyUsed.fee / 10_000).toFixed(2)} percent, spacing{' '}
                     {snapshot.vault.keyUsed.tickSpacing}
                   </Unit>
-                </span>
+                </>
               ) : (
-                <span className="unavailable">unavailable</span>
+                <Missing reason={NOT_READ_YET} />
               )}
-            </Metric>
-            <Metric label="lp fee, live" note="StateView.getSlot0, hundredths of a bip">
-              <Show result={snapshot?.uniswap.lpFee ?? notRead}>{(value) => <span className="num">{value}</span>}</Show>
-            </Metric>
-            <Metric label="pool liquidity" note="StateView.getLiquidity">
+            </Field>
+            <Field label="lp fee, live" note="StateView.getSlot0, hundredths of a bip">
+              <Show result={snapshot?.uniswap.lpFee ?? notRead}>{(value) => <Num>{value}</Num>}</Show>
+            </Field>
+            <Field label="pool liquidity" note="StateView.getLiquidity">
               <Show result={snapshot?.uniswap.poolLiquidity ?? notRead}>
-                {(value) => (
-                  <span className="num" title={`${value.toString()} raw`}>
-                    {liquidityText(value)}
-                  </span>
-                )}
+                {(value) => <Num title={`${value.toString()} raw`}>{liquidityText(value)}</Num>}
               </Show>
-            </Metric>
-            <Metric label="hook" note="no hook on this pool, the maker is not one">
-              {snapshot ? (
-                <Addr value={snapshot.vault.keyUsed.hooks} />
-              ) : (
-                <span className="unavailable">unavailable</span>
-              )}
-            </Metric>
-            <Metric label="position owner">
+            </Field>
+            <Field label="hook" note="no hook on this pool, the maker is not one">
+              {snapshot ? <Addr value={snapshot.vault.keyUsed.hooks} /> : <Missing reason={NOT_READ_YET} />}
+            </Field>
+            <Field label="position owner">
               <Show result={snapshot?.uniswap.positionOwner ?? notRead}>
                 {(value) => (
                   <>
                     <Addr value={value} />
                     {vaultAddress && value.toLowerCase() === vaultAddress.toLowerCase() ? (
-                      <span className="unit">the vault</span>
+                      <Unit>the vault</Unit>
                     ) : null}
                   </>
                 )}
               </Show>
-            </Metric>
-            <Metric label="poolId">
+            </Field>
+            <Field label="poolId">
               {snapshot?.uniswap.poolId ? (
-                <span className="num" title={snapshot.uniswap.poolId}>
-                  {short(snapshot.uniswap.poolId, 10, 6)}
-                </span>
+                <Num title={snapshot.uniswap.poolId}>{shortHash(snapshot.uniswap.poolId)}</Num>
               ) : (
-                <>
-                  <span className="unavailable">unavailable</span>
-                  <span className="why">derived from the position pool key, which needs a live position</span>
-                </>
+                <Missing reason="derived from the position pool key, which needs a live position" />
               )}
-            </Metric>
-            <div className="subhead">the same pool, as the Uniswap API reports it</div>
+            </Field>
+
+            <Subhead>the same pool, as the Uniswap API reports it</Subhead>
             {apiPool ? (
               <>
-                <Metric label="current tick" note="POST /lp/pool_info">
-                  <span className="num">{String(apiPool.currentTick)}</span>
-                </Metric>
-                <Metric label="pool liquidity" note="POST /lp/pool_info">
-                  <span className="num">{integer(BigInt(String(apiPool.poolLiquidity ?? 0)))}</span>
-                </Metric>
-                <Metric label="token reserves" note="token0 and token1, from the API">
-                  <span className="num">
+                <Field label="current tick" note="POST /lp/pool_info">
+                  <Num>{String(apiPool.currentTick)}</Num>
+                </Field>
+                <Field label="pool liquidity" note="POST /lp/pool_info">
+                  <Num>{integer(BigInt(String(apiPool.poolLiquidity ?? 0)))}</Num>
+                </Field>
+                <Field label="token reserves" note="token0 and token1, from the API">
+                  <Num>
                     {fmtAmount(BigInt(String(apiPool.token0Reserves ?? 0)), decimalsA)} /{' '}
                     {fmtAmount(BigInt(String(apiPool.token1Reserves ?? 0)), decimalsB)}
-                  </span>
-                </Metric>
+                  </Num>
+                </Field>
               </>
             ) : (
               <div className="empty">
@@ -1255,39 +1298,26 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
                 panel at the bottom. It is never called on a timer: the key allows six requests a second.
               </div>
             )}
+          </Panel>
 
-            <div style={{ marginTop: 12 }}>
-              <button className="btn small" onClick={() => void onUnwindCalldata()} disabled={unwind.status === 'pending'}>
-                Build unwind calldata
-              </button>
-              <span className="faint" style={{ marginLeft: 8, fontSize: 12 }}>
-                calls /lp/decrease for real
-              </span>
-            </div>
-          </div>
-        </section>
-
-        <section className="column vault">
-          <div className="column-head">
-            <h3>BebecitaVault, the maker</h3>
-            <span className="who">
-              {vaultAddress ? <Addr value={vaultAddress} /> : <span className="unavailable">no vault</span>}
-            </span>
-          </div>
-          <div className="column-body">
-            <Metric label={`free float, ${symbolA}`} note="balanceOf the vault" big>
+          <Panel
+            accent="vault"
+            title="BebecitaVault, the maker"
+            meta={vaultAddress ? <Addr value={vaultAddress} /> : <Missing reason="no vault address" />}
+          >
+            <Field label={`free float, ${symbolA}`} note="balanceOf the vault" size="lead">
               <Show result={snapshot?.vault.floatA ?? notRead}>
-                {(value) => <span className="num">{fmtAmount(value, decimalsA, 4)}</span>}
+                {(value) => <Num>{fmtAmount(value, decimalsA)}</Num>}
               </Show>
-            </Metric>
-            <Metric label={`free float, ${symbolB}`} note="balanceOf the vault" big>
+            </Field>
+            <Field label={`free float, ${symbolB}`} note="balanceOf the vault" size="lead">
               <Show result={snapshot?.vault.floatB ?? notRead}>
-                {(value) => <span className="num">{fmtAmount(value, decimalsB, 4)}</span>}
+                {(value) => <Num>{fmtAmount(value, decimalsB)}</Num>}
               </Show>
-            </Metric>
+            </Field>
 
-            <div className="subhead">URC-3, hook TVL and effective liquidity reporting</div>
-            <Metric
+            <Subhead>URC-3, hook TVL and effective liquidity reporting</Subhead>
+            <Field
               label="reserves"
               note={
                 snapshot
@@ -1296,27 +1326,27 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
               }
             >
               <Show result={snapshot?.vault.reserves ?? notRead}>
-                {([token0, token1]) => (
-                  <span className="num">
-                    {fmtAmount(token0, snapshot ? tokenOf(snapshot, snapshot.vault.keyUsed.currency0).decimals : 18, 2)}
+                {([first, second]) => (
+                  <Num>
+                    {fmtAmount(first, snapshot ? tokenOf(snapshot, snapshot.vault.keyUsed.currency0).decimals : 18)}
                     {' / '}
-                    {fmtAmount(token1, snapshot ? tokenOf(snapshot, snapshot.vault.keyUsed.currency1).decimals : 18, 2)}
-                  </span>
+                    {fmtAmount(second, snapshot ? tokenOf(snapshot, snapshot.vault.keyUsed.currency1).decimals : 18)}
+                  </Num>
                 )}
               </Show>
-            </Metric>
-            <Metric label="effective liquidity" note="getEffectiveLiquidity(PoolKey), what one fill can reach">
+            </Field>
+            <Field label="effective liquidity" note="getEffectiveLiquidity(PoolKey), what one fill can reach">
               <Show result={snapshot?.vault.effectiveLiquidity ?? notRead}>
-                {([token0, token1]) => (
-                  <span className="num">
-                    {fmtAmount(token0, snapshot ? tokenOf(snapshot, snapshot.vault.keyUsed.currency0).decimals : 18, 2)}
+                {([first, second]) => (
+                  <Num>
+                    {fmtAmount(first, snapshot ? tokenOf(snapshot, snapshot.vault.keyUsed.currency0).decimals : 18)}
                     {' / '}
-                    {fmtAmount(token1, snapshot ? tokenOf(snapshot, snapshot.vault.keyUsed.currency1).decimals : 18, 2)}
-                  </span>
+                    {fmtAmount(second, snapshot ? tokenOf(snapshot, snapshot.vault.keyUsed.currency1).decimals : 18)}
+                  </Num>
                 )}
               </Show>
-            </Metric>
-            <Metric label="invariant" note="effective liquidity must not exceed reserves">
+            </Field>
+            <Field label="invariant" note="effective liquidity must not exceed reserves">
               {snapshot?.vault.reserves.ok && snapshot.vault.effectiveLiquidity.ok ? (
                 snapshot.vault.effectiveLiquidity.value[0] <= snapshot.vault.reserves.value[0] &&
                 snapshot.vault.effectiveLiquidity.value[1] <= snapshot.vault.reserves.value[1] ? (
@@ -1329,45 +1359,47 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
                   </span>
                 )
               ) : (
-                <span className="unavailable">unavailable</span>
+                <Missing reason={NOT_READ_YET} />
               )}
-            </Metric>
+            </Field>
 
-            <div className="subhead">what one fill may lean on</div>
-            <Metric label="reachableFromPosition" note="the figure instruction 0x92 clamps to" big>
+            <Subhead>what one fill may lean on</Subhead>
+            <Field label="reachableFromPosition" note="the figure instruction 0x92 clamps to" size="lead">
               <Show result={snapshot?.vault.reachable ?? notRead}>
-                {(value) => <span className="num">{fmtAmount(value, decimalsB, 2)}</span>}
+                {(value) => <Num>{fmtAmount(value, decimalsB)}</Num>}
               </Show>
-            </Metric>
-            <Metric label="maxUnwindPct" note="largest share of the position one fill may unwind">
+            </Field>
+            <Field label="maxUnwindPct" note="largest share of the position one fill may unwind">
               <Show result={snapshot?.vault.maxUnwindPct ?? notRead}>
                 {(value) => (
-                  <span className="num">
-                    {value} <Unit>percent</Unit>
-                  </span>
+                  <>
+                    <Num>{integer(value)}</Num>
+                    <Unit>percent</Unit>
+                  </>
                 )}
               </Show>
-            </Metric>
-            <Metric label="haircutBps" note="safety margin on the deployed leg">
+            </Field>
+            <Field label="haircutBps" note="safety margin on the deployed leg">
               <Show result={snapshot?.vault.haircutBps ?? notRead}>
                 {(value) => (
-                  <span className="num">
-                    {value} <Unit>bps</Unit>
-                  </span>
+                  <>
+                    <Num>{integer(value)}</Num>
+                    <Unit>bps</Unit>
+                  </>
                 )}
               </Show>
-            </Metric>
-            <Metric label="unitsPerLiquidityE18" note="tokenOut units per unit of position liquidity">
+            </Field>
+            <Field label="unitsPerLiquidityE18" note="tokenOut units per unit of position liquidity">
               <Show result={snapshot?.vault.unitsPerLiquidityE18 ?? notRead}>
-                {(value) => <span className="num">{integer(value)}</span>}
+                {(value) => <Num>{integer(value)}</Num>}
               </Show>
-            </Metric>
-            <Metric label="pool key used" note={snapshot?.vault.keyFromPosition ? 'read from the position' : undefined}>
+            </Field>
+            <Field label="pool key used" note={snapshot?.vault.keyFromPosition ? 'read from the position' : undefined}>
               {snapshot ? (
                 snapshot.vault.keyFromPosition ? (
-                  <span className="num">
+                  <Num>
                     fee {snapshot.vault.keyUsed.fee}, spacing {snapshot.vault.keyUsed.tickSpacing}
-                  </span>
+                  </Num>
                 ) : (
                   <>
                     <span className="unavailable">constructed</span>
@@ -1378,63 +1410,62 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
                   </>
                 )
               ) : (
-                <span className="unavailable">unavailable</span>
+                <Missing reason={NOT_READ_YET} />
               )}
-            </Metric>
-            <Metric label="owner">
+            </Field>
+            <Field label="owner">
               <Show result={snapshot?.vault.owner ?? notRead}>
                 {(value) => (
                   <>
                     <Addr value={value} />
-                    {isVaultOwner ? <span className="unit">your wallet</span> : null}
+                    {isVaultOwner ? <Unit>your wallet</Unit> : null}
                   </>
                 )}
               </Show>
-            </Metric>
-          </div>
-        </section>
+            </Field>
+          </Panel>
 
-        <section className="column aqua">
-          <div className="column-head">
-            <h3>Aqua, official</h3>
-            <span className="who">
-              <Show result={snapshot?.aqua.address ?? notRead}>{(value) => <Addr value={value} />}</Show>
-            </span>
-          </div>
-          <div className="column-body">
-            <Metric label="router AQUA()" note="the one line that proves the official contract does the work">
+          <Panel
+            accent="aqua"
+            title="Aqua, official"
+            meta={<Show result={snapshot?.aqua.address ?? notRead}>{(value) => <Addr value={value} />}</Show>}
+          >
+            <Field label="router AQUA()" note="the one line that proves the official contract does the work">
               <Show result={snapshot?.aqua.routerAqua ?? notRead}>
                 {(value) => (
                   <>
                     <Addr value={value} />
                     {snapshot?.aqua.address.ok && value.toLowerCase() === snapshot.aqua.address.value.toLowerCase() ? (
-                      <span className="unit">matches the vault</span>
+                      <Unit>matches the vault</Unit>
                     ) : null}
                   </>
                 )}
               </Show>
-            </Metric>
-            <Metric label="custom opcode" note="OPCODE_UNWIND_PRICED_BALANCE_OUT()">
+            </Field>
+            <Field label="custom opcode" note="OPCODE_UNWIND_PRICED_BALANCE_OUT()">
               <Show result={snapshot?.aqua.opcode ?? notRead}>
                 {(value) => (
-                  <span className="num">
-                    {value.toString()} <Unit>0x{value.toString(16)}</Unit>
-                  </span>
+                  <>
+                    <Num>{value.toString()}</Num>
+                    <Unit>0x{value.toString(16)}</Unit>
+                  </>
                 )}
               </Show>
-            </Metric>
-            <Metric label="app" note="the router the strategies were shipped to">
-              {snapshot?.aqua.app ? <Addr value={snapshot.aqua.app} /> : <span className="unavailable">unavailable</span>}
-            </Metric>
+            </Field>
+            <Field label="app" note="the router the strategies were shipped to">
+              {snapshot?.aqua.app ? <Addr value={snapshot.aqua.app} /> : <Missing reason={NOT_READ_YET} />}
+            </Field>
 
-            <div className="subhead">
+            <Subhead
+              note={
+                history
+                  ? `Shipped events on the vault, blocks ${integer(history.scannedFrom)} to ${integer(history.head)}. Balances are rawBalances(maker, app, strategyHash, token) on Aqua`
+                  : 'balances are rawBalances(maker, app, strategyHash, token) on Aqua'
+              }
+            >
               every strategy this vault has shipped
-              {history ? (
-                <span className="note">
-                  Shipped events on the vault, blocks {history.scannedFrom.toString()} to {history.head.toString()}
-                </span>
-              ) : null}
-            </div>
+              {snapshot?.aqua.strategies.length ? ` , ${snapshot.aqua.strategies.length}` : ''}
+            </Subhead>
             {historyError ? (
               <div className="empty">
                 <span className="unavailable">the log scan stopped early</span>
@@ -1442,7 +1473,8 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
               </div>
             ) : null}
             {snapshot?.aqua.strategies.length ? (
-              snapshot.aqua.strategies.map((strategy) => {
+              <div className="strategies">
+              {snapshot.aqua.strategies.map((strategy) => {
                 const meta = strategyMeta.get(strategy.hash.toLowerCase())
                 const isLive = liveStrategyHash?.toLowerCase() === strategy.hash.toLowerCase()
                 const docked = strategy.balances.some((balance) => balance.raw.ok && balance.raw.value.tokensCount === 255)
@@ -1454,7 +1486,7 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
                   <div className="strategy" key={strategy.hash}>
                     <div className="strategy-head">
                       <span className="hash" title={strategy.hash}>
-                        {short(strategy.hash, 12, 8)}
+                        {shortHash(strategy.hash)}
                       </span>
                       {isLive ? <span className="chip">quoting now</span> : null}
                       {docked ? <span className="chip warn">docked</span> : null}
@@ -1462,10 +1494,8 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
                     <div className="strategy-meta">
                       {meta ? (
                         <>
-                          block {meta.blockNumber.toString()},{' '}
-                          <a href={txUrl(meta.txHash)} target="_blank" rel="noreferrer" className="mono">
-                            {short(meta.txHash, 8, 6)}
-                          </a>
+                          block {integer(meta.blockNumber)},{' '}
+                          <TxLink hash={meta.txHash} />
                           {meta.fills
                             ? ` , ${meta.fills} ${meta.fills === 1 ? 'fill' : 'fills'} settled`
                             : ' , no fill settled on it'}
@@ -1475,33 +1505,34 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
                       )}
                     </div>
                     {strategy.balances.map((balance) => (
-                      <Metric
-                        key={balance.token}
-                        label={balance.symbol}
-                        note="rawBalances(maker, app, strategyHash, token)"
-                      >
+                      <Field key={balance.token} label={balance.symbol}>
                         <Show result={balance.raw}>
                           {(value) => (
-                            <span className="num">
-                              {fmtAmount(
-                                value.balance,
-                                balance.token.toLowerCase() === snapshot.tokenA.address.toLowerCase()
-                                  ? decimalsA
-                                  : decimalsB,
-                                2,
-                              )}
+                            <>
+                              <Num>
+                                {fmtAmount(
+                                  value.balance,
+                                  balance.token.toLowerCase() === snapshot.tokenA.address.toLowerCase()
+                                    ? decimalsA
+                                    : decimalsB,
+                                )}
+                              </Num>
                               <Unit>tokensCount {value.tokensCount}</Unit>
-                            </span>
+                            </>
                           )}
                         </Show>
-                      </Metric>
+                      </Field>
                     ))}
                     <div className="strategy-total">
-                      provisioned <span className="num">{fmtAmount(subtotal, 18, 0)}</span> tokens
+                      <span>provisioned</span>
+                      <span>
+                        <span className="num">{fmtAmount(subtotal, 18, 0)}</span> tokens
+                      </span>
                     </div>
                   </div>
                 )
-              })
+              })}
+              </div>
             ) : (
               <div className="empty">
                 No strategy found. The vault emits Shipped when it opens one, and this column reads the balances
@@ -1509,80 +1540,56 @@ export function Dashboard({ config, wallet }: { config: AppConfig | null; wallet
               </div>
             )}
 
-            <div className="subhead">
+            <Subhead
+              note={
+                takerAddress
+                  ? 'the connected wallet, which signs the swap. There is no process between this page and the chain'
+                  : NO_WALLET
+              }
+            >
               the taker
-              <span className="note">
-                the connected wallet, which signs the swap. There is no process between this page and the chain
-              </span>
-            </div>
-            <Metric label="address" note="whoever presses the button">
+            </Subhead>
+            <Field label="address" note="whoever presses the button">
               {takerAddress ? (
-                <Addr value={takerAddress} />
-              ) : (
                 <>
-                  <span className="unavailable">not connected</span>
-                  <span className="why">connect a wallet in the header, it is the taker of the fill</span>
+                  <Addr value={takerAddress} />
+                  {wrongChain ? <Unit>on chain {walletChainId}, not Sepolia</Unit> : null}
                 </>
-              )}
-            </Metric>
-            <Metric label={`balance, ${inSymbol}`} note="what the router will pull from you">
-              {taker ? (
-                <span className="num">{fmtAmount(taker.balance, inDecimals, 4)}</span>
               ) : (
-                <span className="unavailable">not read</span>
+                <Missing reason={NO_WALLET} />
               )}
-            </Metric>
-            <Metric label="allowance to the router" note="not to Aqua, the router pushes on your behalf">
+            </Field>
+            <Field label={`balance, ${inSymbol}`} note="what the router will pull from you">
+              {taker ? (
+                <Num>{fmtAmount(taker.balance, inDecimals)}</Num>
+              ) : (
+                <Missing reason={takerAddress ? 'the balance has not been read yet' : NO_WALLET} />
+              )}
+            </Field>
+            <Field label="allowance to the router" note="not to Aqua, the router pushes on your behalf">
               {taker ? (
                 taker.allowance > 2n ** 200n ? (
-                  <span className="num">
-                    unlimited <Unit>approved</Unit>
-                  </span>
+                  <>
+                    <Num>unlimited</Num>
+                    <Unit>approved</Unit>
+                  </>
                 ) : (
-                  <span className="num">{fmtAmount(taker.allowance, inDecimals, 4)}</span>
+                  <Num>{fmtAmount(taker.allowance, inDecimals)}</Num>
                 )
               ) : (
-                <span className="unavailable">not read</span>
+                <Missing reason={takerAddress ? 'the allowance has not been read yet' : NO_WALLET} />
               )}
-            </Metric>
-            {mint.status !== 'idle' ? (
-              <Metric label="mint" note="TestERC20.mint, public on purpose">
-                {mint.status === 'ok' ? (
-                  <a href={txUrl(mint.value.hash)} target="_blank" rel="noreferrer" className="mono">
-                    {short(mint.value.hash, 10, 8)}
-                  </a>
-                ) : mint.status === 'pending' ? (
-                  <span className="faint">waiting on the wallet</span>
-                ) : (
-                  <span className="unavailable">{mint.message}</span>
-                )}
-              </Metric>
-            ) : null}
-            {approval.status !== 'idle' ? (
-              <Metric label="approve" note="ERC20 approve to the router">
-                {approval.status === 'ok' ? (
-                  <a href={txUrl(approval.value.hash)} target="_blank" rel="noreferrer" className="mono">
-                    {short(approval.value.hash, 10, 8)}
-                  </a>
-                ) : approval.status === 'pending' ? (
-                  <span className="faint">waiting on the wallet</span>
-                ) : (
-                  <span className="unavailable">{approval.message}</span>
-                )}
-              </Metric>
-            ) : null}
+            </Field>
             {router ? (
-              <Metric label="router">
-                <a href={addressUrl(router)} target="_blank" rel="noreferrer" className="mono">
-                  {short(router, 10, 6)}
-                </a>
-              </Metric>
+              <Field label="router">
+                <Addr value={router} />
+              </Field>
             ) : null}
-          </div>
-        </section>
-      </div>
+          </Panel>
+        </div>
 
-      <NetworkPanel />
-    </div>
+        <NetworkPanel />
+      </div>
+    </StatedReasonsProvider>
   )
 }
