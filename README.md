@@ -202,6 +202,11 @@ The Uniswap API accepts chainId `11155111`, and Uniswap's own FAQ states there i
 | v4 PositionManager | `0x429ba70129df741B2Ca2a85BC3A2a3328e5c09b4` |
 | v4 StateView | `0xe1dd9c3fa50edb962e442f60dfbc432e24537e4c` |
 
+One warning about the second row, because it cost us an afternoon. That deployment does not execute orders
+built against the `swap-vm` commit this project pins: `quote()` reverts with empty return data, including for
+an order that was never shipped, where a router built from the published source names its error. It is
+recognisably an `AquaSwapVMRouter` otherwise. Reported with the repro in [FEEDBACK.md](FEEDBACK.md).
+
 ## What a fill costs
 
 | | gas |
