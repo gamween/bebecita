@@ -1469,6 +1469,10 @@ td.addr {
  * A fixed share of the row, right aligned, monospace and tabular, so every number on the page has its digits
  * in the same place. Units go under the number rather than beside it, which is what stops a long qualifier
  * from wrapping a figure onto two lines.
+ *
+ * The .field family below is emitted by Field in src/components/primitives.tsx, which the dashboard is in the
+ * middle of remounting, so several of these selectors have no live match right now. Do not let a dead CSS
+ * pass eat them.
  */
 .field {
   display: grid;
@@ -1955,7 +1959,13 @@ td.addr {
   padding: 10px 0;
 }
 
-/* network panel ----------------------------------------------------------- */
+/*
+ * network panel -----------------------------------------------------------
+ *
+ * Everything from here to .pre-label styles markup that still lives in src/components, currently off screen
+ * while the dashboard is being remounted around it. It looks unused to a static sweep and is not, so a dead
+ * CSS pass must leave this run alone.
+ */
 
 .netrows {
   margin: -6px calc(var(--gutter) * -1) -14px;
@@ -2968,6 +2978,15 @@ th {
 @media (max-width: 980px) {
   .topbar-inner {
     gap: 18px;
+  }
+
+  /*
+   * The narrow collapse at :2187 is overridden by the two track redeclaration further down this file, which
+   * left the heading in a ~76px column on a phone while its h2 stayed 42px wide. Same specificity, so the
+   * fix has to come after that redeclaration rather than before it.
+   */
+  .section-intro {
+    grid-template-columns: 1fr;
   }
 
   .hero-grid {
