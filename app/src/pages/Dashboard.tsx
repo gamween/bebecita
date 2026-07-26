@@ -728,13 +728,11 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
     setClaim({ status: 'pending' })
     executeTx.reset()
     try {
-      const key = snapshot.vault.keyUsed
+      // No token addresses: `ClaimFeesRequest` does not declare them, the position is named by `tokenId` alone.
       const { payload } = await claimFees({
         chainId,
         walletAddress: vaultAddress,
         tokenId: tokenId.toString(),
-        token0: key.currency0,
-        token1: key.currency1,
       })
       setClaim({ status: 'ok', value: { tx: findTransactionRequest(payload), payload } })
     } catch (error) {
