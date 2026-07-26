@@ -118,7 +118,7 @@ the taker's input and already executes calldata the Uniswap API built. It is del
 are two reasons rather than one.
 
 The settlement path is the one thing that must not grow new failure modes. Everything in this design that can
-revert already lives in those two hooks: four guards, a payload the taker supplied, and two PositionManager
+revert already lives in those two hooks: five guards, a payload the taker supplied, and two PositionManager
 calls whose success is the fill's success. Adding a swap would add a router, a second pool interaction, a
 slippage bound and a deadline to that path, and each of them turns a market condition into a failed fill rather
 than into a failed maintenance job. A rebalance that fails at four in the morning costs a re-run. A fill that

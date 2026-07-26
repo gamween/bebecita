@@ -104,7 +104,7 @@ Acceptance: the numbers move on their own while nobody touches anything.
 
 ## T7. Docs and demo, `docs/complete`
 
-- `docs/ARCHITECTURE.md`: the settlement window, the four guards, the trust model.
+- `docs/ARCHITECTURE.md`: the settlement window, the five guards, the trust model.
 - `docs/DEMO.md`: the three minute script, screen by screen, including the split screen negative moment
   against the official 1inch router already deployed at `0x8fdd04db...`.
 - `docs/DECISIONS.md`: what was decided and why, including what was deliberately not built.
