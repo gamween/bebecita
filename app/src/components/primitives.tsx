@@ -3,12 +3,14 @@ import { createContext, useContext, type ReactNode } from 'react'
 import { addressUrl, shortAddress, shortHash, txUrl, type Result } from '../lib/format'
 
 /**
- * The pieces every panel on this page is built from.
+ * The pieces the panels on this page are built from.
  *
- * There are three of them, and the point is that there is no fourth: the Uniswap column, the vault column,
- * the Aqua column, the SLAC cards, the result cards and the network panel are all a `Panel` full of `Field`s
- * separated by `Subhead`s. Spacing, heading weight and the alignment of the value column are therefore
- * decided once, in one stylesheet block, instead of drifting per section.
+ * Three of them carry the layout: a `Panel` holds `Field`s grouped by `Subhead`s, so spacing, heading weight
+ * and the alignment of the value column are decided once, in one stylesheet block, instead of drifting per
+ * section. The rest are there so a section never has to invent its own way of saying something. `Show` and
+ * `Missing` render the reason a read did not land, `Placeholder` is the quiet form of that reason once the page
+ * has stated it, and `Addr`, `TxLink`, `Num` and `Unit` put an address, a hash or a figure in the monospace
+ * column with the explorer link and the tabular digits already attached.
  */
 
 /**
