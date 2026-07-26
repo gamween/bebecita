@@ -33,6 +33,7 @@
  */
 import type { Address, Hex } from 'viem'
 
+import { bindingSide } from './sizing.js'
 import { buildFillTakerTraits, buildQuoteTakerTraits } from './takerTraits.js'
 
 /** The order the book quotes on, exactly as it was shipped. One byte of difference is a different strategy. */
@@ -141,6 +142,8 @@ export interface FillPlan {
   releasedOut: bigint
   surplus: bigint
   redeposit: bigint
+  /** Which token the redeposit named. The other leg is whatever the API computed against it. */
+  redepositToken: Address
   positionManager: Address
   decreaseCalldata: Hex
   increaseCalldata: Hex
@@ -276,7 +279,17 @@ export async function planFill(
   // sided at all.
   const availableOut = floatOut + releasedOut - quoted.amountOut
   const availableIn = floatIn + releasedIn + quoted.amountIn
-  const redeposit = ((availableOut < availableIn ? availableOut : availableIn) * REDEPOSIT_SHARE) / 100n
+
+  // Which of the two names the deposit is decided by `bindingSide`, against the pool's own ratio, and never by
+  // a `min` of the two raw amounts: those are amounts of two different tokens and comparing them directly is
+  // only meaningful while the pool sits at parity. The ratio comes from the decrease that just ran, because a
+  // pro rata withdrawal releases the two tokens in exactly the proportion the position holds them.
+  const binding = bindingSide(
+    { token: tokenIn, held: availableIn, reserve: releasedIn },
+    { token: tokenOut, held: availableOut, reserve: releasedOut },
+  )
+  const redepositToken = binding.token
+  const redeposit = (binding.held * REDEPOSIT_SHARE) / 100n
   if (redeposit === 0n) throw new Error('nothing left to redeposit after the fill, the sizing is wrong')
 
   const increase = await api.increase({
@@ -284,10 +297,14 @@ export async function planFill(
     tokenId: params.tokenId,
     token0: params.token0,
     token1: params.token1,
-    independentToken: tokenOut,
+    independentToken: redepositToken,
     independentAmount: redeposit,
   })
-  info('/lp/increase', `${redeposit} named on the output side, the API computes the other leg`)
+  info(
+    '/lp/increase',
+    `${redeposit} named on the ${redepositToken === tokenOut ? 'output' : 'input'} side, which is the one the ` +
+      "pool's ratio makes scarce, and the API computes the other leg",
+  )
 
   const pinned = params.positionManager.toLowerCase()
   if (decrease.to.toLowerCase() !== pinned || increase.to.toLowerCase() !== pinned) {
@@ -332,6 +349,7 @@ export async function planFill(
     releasedOut,
     surplus,
     redeposit,
+    redepositToken,
     positionManager: params.positionManager,
     decreaseCalldata: decrease.data,
     increaseCalldata: increase.data,
