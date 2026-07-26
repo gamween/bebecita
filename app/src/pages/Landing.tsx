@@ -7,6 +7,48 @@ const PHASES = [
   'Pay, then redeploy',
 ]
 
+/**
+ * The same sequence the marquee gestures at, written out so it can be checked.
+ *
+ * The two source citations are the point of this block. `preTransferOut` and the pull are consecutive
+ * statements in 1inch's own router, which is what makes just in time collateral possible at all, and a judge
+ * can open the file and verify it. That claim does not survive being paraphrased, so it lives here rather
+ * than in the moving list.
+ */
+const SETTLEMENT = [
+  {
+    step: '1',
+    where: 'runLoop',
+    title: 'The instruction clamps',
+    body: 'Opcode 0x92 reads the vault float and the position liquidity, and lowers the quotable balance to what is genuinely reachable. The curve then prices against that.',
+  },
+  {
+    step: '2',
+    where: 'SwapVM.sol:310-314',
+    title: 'The position unwinds',
+    body: 'The maker hook executes the /lp/decrease calldata the Uniswap API built for this fill.',
+  },
+  {
+    step: '3',
+    where: 'SwapVM.sol:321',
+    title: 'The taker is paid',
+    body: 'AQUA.pull runs on the very next statement, and it holds in both transfer orders the router supports.',
+    link: true,
+  },
+  {
+    step: '4',
+    where: 'SwapVM.sol:262',
+    title: 'The vault is credited',
+    body: 'AQUA.push moves the taker input into the maker balance.',
+  },
+  {
+    step: '5',
+    where: 'SwapVM.sol:282-286',
+    title: 'The inventory redeploys',
+    body: 'The second hook executes /lp/increase, and the capital goes back to earning.',
+  },
+]
+
 function ContractTable({ config }: { config: AppConfig | null }) {
   const deployment = config?.deployment ?? {}
   const chain = config?.chain ?? {}
@@ -147,6 +189,26 @@ export function Landing({ config }: { config: AppConfig | null }) {
             ))}
           </div>
         </div>
+
+        <div className="wrap landing-wrap">
+          <ol className="settlement">
+            {SETTLEMENT.map((item) => (
+              <li className={item.link ? 'settlement-step is-linked' : 'settlement-step'} key={item.step}>
+                <div className="settlement-head">
+                  <span className="settlement-index" aria-hidden="true">{item.step}</span>
+                  <code className="settlement-where">{item.where}</code>
+                </div>
+                <h3>{item.title}</h3>
+                <p>{item.body}</p>
+              </li>
+            ))}
+          </ol>
+          <p className="settlement-note">
+            Steps two and three are consecutive statements in the sponsor's own source. The maker hook is the
+            last point anyone controls before the tokens leave, which is the whole reason the collateral can
+            arrive just in time.
+          </p>
+        </div>
       </section>
 
       <section className="section proof-section" id="proof">
@@ -163,7 +225,10 @@ export function Landing({ config }: { config: AppConfig | null }) {
                 <span className="test-number">A</span>
                 <div>
                   <h3>Uniswap LP API</h3>
-                  <p>Builds the decrease and increase calls executed by the vault.</p>
+                  <p>
+                    Take it out and there is no calldata to put in either hook, the vault holds almost nothing,
+                    and AQUA.pull reverts on the first fill. There is no degraded mode.
+                  </p>
                   <code>/lp/decrease · /lp/increase</code>
                 </div>
               </article>
@@ -171,7 +236,10 @@ export function Landing({ config }: { config: AppConfig | null }) {
                 <span className="test-number">B</span>
                 <div>
                   <h3>SwapVM opcode 0x92</h3>
-                  <p>Stops the order from quoting more than the position can release.</p>
+                  <p>
+                    Take it out and Aqua quotes the virtual balance the maker shipped, which nothing backs, so
+                    every fill dies at the last statement. That failure is shipped on chain, not described.
+                  </p>
                   <code>reachableFromPosition() · clamp</code>
                 </div>
               </article>
