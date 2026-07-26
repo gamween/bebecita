@@ -1,8 +1,8 @@
-import type { Address, Hex } from 'viem'
+import type { Address, Hex, WalletClient } from 'viem'
 
 import { planFill, type ChainReader, type FillPlan, type LiquidityApi } from '@solver/fillPlan'
 import { erc20Abi, positionManagerAbi, routerAbi, vaultAbi } from './abi'
-import { CHAIN, publicClient, walletClientFor } from './client'
+import { CHAIN, publicClient } from './client'
 import { decrease, increase } from './uniswap'
 
 /**
@@ -12,7 +12,8 @@ import { decrease, increase } from './uniswap'
  * `TakerTraitsLib.build` that `contracts/test/TakerTraits.t.sol` proves byte for byte against the library
  * itself, and the sizing is `solver/src/fillPlan.ts`, the same module `yarn fill` runs. This file is only the
  * browser's half of the environment those two need: reads through viem, the two Uniswap calls through the dev
- * server proxy that holds the API key, and `swap()` through `window.ethereum`.
+ * server proxy that holds the API key, and `swap()` through the wallet client wagmi hands back, which is a
+ * viem client over whichever connector is connected.
  *
  * The connected wallet is the taker, which is what makes the demo self serve. It needs the input token and an
  * allowance to the router, and both are one button away because `TestERC20.mint` is public.
@@ -25,6 +26,8 @@ export interface FillRequest {
   isAToB: boolean
   /** The connected wallet. It signs the swap and it is the address the router pulls the input from. */
   taker: Address
+  /** The viem client wagmi built over the connected connector. Only `swap()` goes through it. */
+  wallet: WalletClient
   order: { maker: Address; traits: bigint; data: Hex }
   orderHash?: Hex
   router: Address
@@ -50,11 +53,16 @@ export interface FillStep {
 export type FillEvent =
   | { type: 'step'; index: number; label: string }
   | { type: 'log'; line: string }
+  /** The hash, the instant the wallet returns it, so the page can link it before the block exists. */
+  | { type: 'sent'; hash: Hex }
   | { type: 'error'; message: string }
 
 export interface FillResult {
   /** Null on a dry run, which simulates against live state and broadcasts nothing. */
   transactionHash: Hex | null
+  /** The block it landed in and what it cost, null on a dry run. */
+  blockNumber: bigint | null
+  gasUsed: bigint | null
   orderHash: Hex
   amountIn: bigint
   amountOut: bigint
@@ -189,9 +197,13 @@ export async function readTakerPosition(params: {
 }
 
 /** Mints `TestERC20` to the connected wallet. Public on the token, which is what makes the demo self serve. */
-export async function mintTo(params: { token: Address; taker: Address; amount: bigint }): Promise<Hex> {
-  const wallet = walletClientFor(params.taker)
-  return wallet.writeContract({
+export async function mintTo(params: {
+  wallet: WalletClient
+  token: Address
+  taker: Address
+  amount: bigint
+}): Promise<Hex> {
+  return params.wallet.writeContract({
     account: params.taker,
     chain: CHAIN,
     address: params.token,
@@ -209,13 +221,13 @@ export async function mintTo(params: { token: Address; taker: Address; amount: b
  * the push with an ERC20 error naming neither contract.
  */
 export async function approveRouter(params: {
+  wallet: WalletClient
   token: Address
   taker: Address
   router: Address
   amount?: bigint
 }): Promise<Hex> {
-  const wallet = walletClientFor(params.taker)
-  return wallet.writeContract({
+  return params.wallet.writeContract({
     account: params.taker,
     chain: CHAIN,
     address: params.token,
@@ -298,7 +310,7 @@ export async function runFill(request: FillRequest): Promise<FillResult> {
   const [simulatedIn, simulatedOut, simulatedHash] = result
   emit({ type: 'log', line: `simulated  ${simulatedIn} in, ${simulatedOut} out, orderHash ${simulatedHash}` })
 
-  const base: Omit<FillResult, 'transactionHash' | 'dry'> = {
+  const base: Omit<FillResult, 'transactionHash' | 'blockNumber' | 'gasUsed' | 'dry'> = {
     orderHash: plan.orderHash,
     amountIn: simulatedIn,
     amountOut: simulatedOut,
@@ -313,18 +325,28 @@ export async function runFill(request: FillRequest): Promise<FillResult> {
     log,
   }
 
-  if (request.dry) return { ...base, transactionHash: null, dry: true }
+  if (request.dry) return { ...base, transactionHash: null, blockNumber: null, gasUsed: null, dry: true }
 
-  const wallet = walletClientFor(request.taker)
-  const transactionHash = await wallet.writeContract({ ...swapArgs, chain: CHAIN })
+  const transactionHash = await request.wallet.writeContract({
+    ...swapArgs,
+    account: request.taker,
+    chain: CHAIN,
+  })
+  emit({ type: 'sent', hash: transactionHash })
   emit({ type: 'step', index: 6, label: 'read the receipt back and prove the two PositionManager calls' })
   emit({ type: 'log', line: `transaction  ${transactionHash}` })
 
   const receipt = await publicClient.waitForTransactionReceipt({ hash: transactionHash })
   if (receipt.status !== 'success') {
-    throw new Error(`the fill reverted, ${transactionHash}. The receipt panel below decodes what happened.`)
+    throw new Error('the fill reverted on chain, the receipt panel below decodes what happened')
   }
   emit({ type: 'log', line: `status  success, block ${receipt.blockNumber}, gas ${receipt.gasUsed}` })
 
-  return { ...base, transactionHash, dry: false }
+  return {
+    ...base,
+    transactionHash,
+    blockNumber: receipt.blockNumber,
+    gasUsed: receipt.gasUsed,
+    dry: false,
+  }
 }
