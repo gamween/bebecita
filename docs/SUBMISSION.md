@@ -32,7 +32,7 @@ a number written once goes stale and a number with its own command does not.
 | Item | Status |
 |---|---|
 | Contracts verified on Etherscan | done, all four |
-| App deployed and public | done, https://bebecita-fh121iw64-gamween-7559s-projects.vercel.app |
+| App deployed and public | done, https://bebecita-aqua.vercel.app |
 | Both serverless proxies live in production | done, see the two commands below |
 | Demo video, 2 to 4 minutes | **TODO, Fianso**, script ready in `docs/DEMO.md` |
 | Demo replayable live | done, `yarn demo:reset` then `yarn fill`, run twice consecutively for real |
@@ -71,12 +71,12 @@ worse artefact than no deployment at all:
 
 ```bash
 curl -sD - -o /dev/null -X POST \
-  https://bebecita-fh121iw64-gamween-7559s-projects.vercel.app/api/uniswap/lp/pool_info \
+  https://bebecita-aqua.vercel.app/api/uniswap/lp/pool_info \
   -H 'content-type: application/json' \
   -d '{"chainId":11155111,"protocol":"V4","poolParameters":{"tokenAddressA":"0x0128Ac6B5E3364b022e55A0cf9c0cb4987B3B20f","tokenAddressB":"0xdB41CB0A2EEFF8Ed53Ef019D4C9826744f500B7F","fee":3000,"tickSpacing":60,"hookAddress":"0x0000000000000000000000000000000000000000"}}'
 # 200, x-bebecita-api-key: present, x-bebecita-upstream: https://liquidity.api.uniswap.org/lp/pool_info
 
-curl -s -X POST https://bebecita-fh121iw64-gamween-7559s-projects.vercel.app/api/rpc \
+curl -s -X POST https://bebecita-aqua.vercel.app/api/rpc \
   -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}'
 # {"jsonrpc":"2.0","result":"0x...","id":1}

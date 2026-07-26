@@ -3,7 +3,7 @@
 The landing page and the dashboard. Vite, React, TypeScript, viem, wagmi. No component library, no chart
 library, no animation library: the styling is one CSS file and the wallet is wagmi over viem clients.
 
-Deployed at **https://bebecita-fh121iw64-gamween-7559s-projects.vercel.app**, with both proxies live as
+Deployed at **https://bebecita-aqua.vercel.app**, with both proxies live as
 serverless functions. See the Deployment section of `docs/ARCHITECTURE.md`.
 
 ```bash
