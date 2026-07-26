@@ -1,5 +1,5 @@
 import type { AppConfig } from '../lib/config'
-import { addressUrl } from '../lib/format'
+import { addressUrl, txUrl } from '../lib/format'
 
 const PHASES = [
   'Expose honest depth',
@@ -59,7 +59,8 @@ function ContractTable({ config }: { config: AppConfig | null }) {
     { name: 'test token A', note: 'demo asset', address: deployment.tokenA },
     { name: 'test token B', note: 'demo asset', address: deployment.tokenB },
     { name: 'Aqua', note: 'official 1inch deployment', address: deployment.aqua ?? chain.aqua },
-    { name: 'AquaSwapVMRouter', note: 'official reference router', address: chain.officialRouter },
+    // The finding is the interesting part of this row, so it is stated here rather than left to FEEDBACK.md.
+    { name: 'AquaSwapVMRouter', note: 'official reference, quote() reverts with 0x', address: chain.officialRouter },
     {
       name: 'v4 PositionManager',
       note: 'position execution',
@@ -252,13 +253,42 @@ export function Landing({ config }: { config: AppConfig | null }) {
                 <strong>Sepolia deployments</strong>
                 <small>Contracts used by the live demo</small>
               </span>
-              <span className="summary-action">Show addresses</span>
+              {/* The verb is a stylesheet rule keyed on [open], because this label used to say Show while open. */}
+              <span className="summary-action">addresses</span>
             </summary>
             <ContractTable config={config} />
           </details>
         </div>
       </section>
 
+      {/*
+       * The disclosure used to be the end of the page, which left a judge who read all of it with the console
+       * two screens back up. The second action is the last recorded fill, so the way out of the page is also
+       * the shortest proof that the sequence above ran.
+       */}
+      <section className="closing">
+        <div className="wrap landing-wrap closing-inner">
+          <div>
+            <div className="eyebrow">Live on Sepolia</div>
+            <h2>Fill it yourself.</h2>
+          </div>
+          <div className="cta">
+            <a className="btn primary" href="#/app">
+              Open live console
+            </a>
+            {config?.deployment.lastFill?.txHash ? (
+              <a
+                className="text-link"
+                href={txUrl(config.deployment.lastFill.txHash)}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Last recorded fill <span aria-hidden="true">↗</span>
+              </a>
+            ) : null}
+          </div>
+        </div>
+      </section>
     </>
   )
 }

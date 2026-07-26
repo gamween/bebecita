@@ -3,7 +3,6 @@ import { useEffect, useState } from 'react'
 import { WalletButton } from './components/Wallet'
 import { CHAIN } from './lib/client'
 import { loadConfig, type AppConfig } from './lib/config'
-import { reason } from './lib/format'
 import { Dashboard } from './pages/Dashboard'
 import { Landing } from './pages/Landing'
 
@@ -20,12 +19,10 @@ function useRoute(): string {
 export function App() {
   const route = useRoute()
   const [config, setConfig] = useState<AppConfig | null>(null)
-  const [configError, setConfigError] = useState<string | null>(null)
 
+  // `loadConfig` collects its own failures into `problems` and always resolves, so there is no rejection path.
   useEffect(() => {
-    loadConfig()
-      .then(setConfig)
-      .catch((cause) => setConfigError(reason(cause)))
+    loadConfig().then(setConfig)
   }, [])
 
   const onApp = route.startsWith('/app')
@@ -61,7 +58,17 @@ export function App() {
                 Live console
               </a>
             </nav>
-          ) : null}
+          ) : (
+            /* The landing bar carries the mark and one quiet way in. The wallet belongs to the console. */
+            <>
+              <a className="wordmark" href="#/">
+                bebecita
+              </a>
+              <a className="text-link" href="#/app">
+                Live console <span aria-hidden="true">↗</span>
+              </a>
+            </>
+          )}
           {onApp ? (
             <div className="status">
               <span className="chip" title={`chainId ${CHAIN.id}`}>
@@ -74,11 +81,16 @@ export function App() {
       </header>
 
       <main id="main-content" tabIndex={-1}>
-        {configError ? (
-          <div className="wrap" style={{ paddingTop: 20 }}>
+        {/*
+         * Both routes read the same two address records, and a 404 on either one turns every address and
+         * balance on the page into "unavailable" with nothing saying why. The console states the same list
+         * next to its own snapshot error, so this copy only covers the landing route.
+         */}
+        {!onApp && config?.problems.length ? (
+          <div className="wrap landing-wrap" style={{ paddingTop: 20 }}>
             <div className="banner bad">
-              The address files could not be loaded: {configError}. They are served from deployments/sepolia.json
-              and solver/src/config.ts by the dev server.
+              The addresses on this page come from deployments/sepolia.json and deployments/chain.json, and they
+              could not be read: {config.problems.join(' · ')}
             </div>
           </div>
         ) : null}
@@ -89,6 +101,13 @@ export function App() {
         <div className="wrap footer-inner">
           <span>Sepolia · chainId {CHAIN.id}</span>
           <div className="footer-links">
+            {/* Both of these are qualifying rows for the Uniswap track, so they are reachable from every page. */}
+            <a href="https://github.com/gamween/bebecita" target="_blank" rel="noreferrer">
+              Source, MIT
+            </a>
+            <a href="https://github.com/gamween/bebecita/blob/main/FEEDBACK.md" target="_blank" rel="noreferrer">
+              FEEDBACK.md
+            </a>
             <a href="https://sepolia.etherscan.io" target="_blank" rel="noreferrer">
               Etherscan
             </a>

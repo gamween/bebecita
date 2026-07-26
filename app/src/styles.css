@@ -178,6 +178,19 @@ main:focus {
   max-width: 1200px;
 }
 
+/* The landing bar holds a mark and one link, and the link takes the side the wallet uses on the console. */
+.wordmark {
+  border-bottom: 0;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+}
+
+.topbar-inner .text-link {
+  margin-left: auto;
+}
+
 .nav {
   display: flex;
   gap: 22px;
@@ -577,7 +590,9 @@ a.btn {
   margin-bottom: 20px;
 }
 
-.hero .cta {
+/* The hero and the closing block run the same pair of actions, one button and one quiet link. */
+.hero .cta,
+.closing .cta {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -1033,6 +1048,15 @@ a.btn {
 .disclosure-note {
   color: var(--ink-faint);
   font-size: 12px;
+}
+
+/* The glyph alone used to flip, so an open disclosure still read "Show addresses". The verb flips with it. */
+.summary-action::before {
+  content: "Show ";
+}
+
+.deployment-disclosure[open] .summary-action::before {
+  content: "Hide ";
 }
 
 .summary-action::after {
@@ -2465,7 +2489,8 @@ pre.json {
 }
 
 @media (max-width: 480px) {
-  .hero .cta {
+  .hero .cta,
+  .closing .cta {
     align-items: flex-start;
     flex-direction: column;
   }
@@ -2732,13 +2757,19 @@ pre.json {
   padding: 112px 0;
 }
 
-.section h2 {
+.section h2,
+.closing h2 {
   max-width: 12ch;
   font-family: var(--display);
   font-size: clamp(48px, 5.2vw, 68px);
   font-weight: 400;
   line-height: 0.98;
   letter-spacing: -0.055em;
+}
+
+/* Shorter copy than a section heading, so the closing line keeps the wider measure it was given above. */
+.closing h2 {
+  max-width: 16ch;
 }
 
 .section-intro {
