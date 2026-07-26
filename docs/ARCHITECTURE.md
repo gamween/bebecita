@@ -212,7 +212,7 @@ compared against two token balances.
 
 ## Deployment
 
-The app is deployed and public at https://bebecita-fh121iw64-gamween-7559s-projects.vercel.app.
+The app is deployed and public at https://bebecita-aqua.vercel.app.
 
 It matters that the deployed thing is the whole app rather than a static build with dead buttons. Two of this
 project's demonstrations run through a proxy: the Uniswap LP calls, which need an `x-api-key` that must not

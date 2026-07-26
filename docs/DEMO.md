@@ -155,7 +155,7 @@ fails with `StrategiesMustBeImmutable`, that is what happened. `yarn negative-mo
 Have the transaction hashes from a previous successful run open in a tab. A live demo that depends on a public
 RPC responding on time is a demo with a single point of failure.
 
-Have the deployed URL open too, https://bebecita-fh121iw64-gamween-7559s-projects.vercel.app, so a laptop
+Have the deployed URL open too, https://bebecita-aqua.vercel.app, so a laptop
 failure costs the demo nothing.
 
 Never open on the word oversubscription. Two other teams here are positioned on solvency floors. Open on the

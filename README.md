@@ -349,7 +349,7 @@ maker parameter it moves, and [docs/DECISIONS.md](docs/DECISIONS.md) for why thi
 
 ## Frontend
 
-Deployed and public: **https://bebecita-fh121iw64-gamween-7559s-projects.vercel.app**
+Deployed and public: **https://bebecita-aqua.vercel.app**
 
 ```bash
 cd app && yarn install && yarn dev     # http://localhost:5173, and nothing else
