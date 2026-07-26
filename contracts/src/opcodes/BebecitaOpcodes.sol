@@ -28,7 +28,11 @@ import { UnwindPricedBalances } from "../instructions/UnwindPricedBalances.sol";
 ///      wired back here because a program that cannot halt early cannot express a conditional strategy.
 contract BebecitaOpcodes is AquaOpcodes, UnwindPricedBalances {
     /// @notice Opcode index of `_unwindPricedBalanceOut1D`, filling the reserved `_92` slot.
-    uint256 public constant OPCODE_UNWIND_PRICED_BALANCE_OUT = 0x92;
+    /// @dev Taken from the sponsor's enum rather than written as a literal, so `OpcodeList.sol` is the single
+    ///      source of truth for where this instruction lives. `test_InstructionTakesReservedSlotOfBalancesTuningBank`
+    ///      stays as documentation of what that slot is, and is now a statement about the enum instead of a
+    ///      comparison of two hand written numbers.
+    uint256 public constant OPCODE_UNWIND_PRICED_BALANCE_OUT = uint256(Opcode._92);
 
     constructor(address aqua) AquaOpcodes(aqua) {}
 
