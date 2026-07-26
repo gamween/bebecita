@@ -3,6 +3,9 @@
 The landing page and the dashboard. Vite, React, TypeScript, viem, wagmi. No component library, no chart
 library, no animation library: the styling is one CSS file and the wallet is wagmi over viem clients.
 
+Deployed at **https://bebecita-fh121iw64-gamween-7559s-projects.vercel.app**, with both proxies live as
+serverless functions. See the Deployment section of `docs/ARCHITECTURE.md`.
+
 ```bash
 cd app
 yarn install
@@ -85,11 +88,15 @@ Both are emitted into `dist` at build time, so a built copy stays self contained
 
 ## The Uniswap API key
 
-Requests go to `/api/uniswap/lp/*` on the dev server, which attaches `x-api-key` from the repository `.env`
-and forwards to `https://liquidity.api.uniswap.org`. The key never reaches the bundle. The proxy echoes the
-real upstream URL back as `x-bebecita-upstream`, which is what the network panel displays, so the panel proves
-where the request actually went. That also means the API buttons need `yarn dev` or `yarn preview`, not a
-plain static server.
+Requests go to `/api/uniswap/lp/*`, which attaches `x-api-key` and forwards to
+`https://liquidity.api.uniswap.org`. The key never reaches the bundle. The proxy echoes the real upstream URL
+back as `x-bebecita-upstream` and whether a key was attached as `x-bebecita-api-key`, which is what the network
+panel displays, so the panel proves where the request actually went instead of asserting it.
+
+That proxy exists twice: Vite middleware under `yarn dev` and `yarn preview`, and `api/uniswap.ts` as a
+serverless function in production. `/api/rpc` is the same arrangement for JSON-RPC. So the API buttons work on
+the deployed site and on a dev server, and nowhere else: a plain static server has no proxy and the panel will
+say so.
 
 Two things the live gateway taught us, both worth a line in FEEDBACK.md:
 
@@ -140,8 +147,10 @@ The connected wallet is the taker, so it needs the input token and an allowance.
 
 Both run through the same four state transaction reporting as the fill, and the taker's balance and allowance
 are read back from the chain next to them. That is what makes the demo self serve: a judge can fill against
-this maker from their own wallet, and the maker's four on-chain guards are what make an unknown taker
-harmless.
+this maker from their own wallet, and the maker's five on-chain guards are what make an unknown taker
+harmless. The fifth, `UnwindValueDiverted`, is the one that matters for a taker nobody vetted: it requires the
+value the unwind released to land in this vault rather than wherever the taker's payload named. See
+`docs/ARCHITECTURE.md`.
 
 ## SLAC
 
@@ -171,7 +180,8 @@ before that window is labelled as coming from the deployment record instead of b
 Optional, all read from the repository root `.env`, which is where `envDir` in `vite.config.ts` points, so the
 frontend and the solver share one file. Only `VITE_` prefixed variables reach the bundle.
 
-- `UNISWAP_API_KEY`, used by the dev server proxy. Without it the gateway answers 401 and the panel shows it.
+- `UNISWAP_API_KEY`, used by the proxy, from `.env` locally and from the project's environment variables on the
+  deployment. Without it the gateway answers 401, the panel shows it, and `x-bebecita-api-key` reads `missing`.
 - `SEPOLIA_RPC_URL`, proxied at `/api/rpc` so a private endpoint stays out of the bundle. Without it the app
   falls back to public Sepolia endpoints.
 - `VITE_SEPOLIA_RPC_URL`, an endpoint the browser may call directly.
