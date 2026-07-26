@@ -543,7 +543,13 @@ async function main() {
   }
   writeDeployments(deployments)
   console.log('\n    written to      deployments/sepolia.json, under rebalance')
-  console.log(`\nRebalanced. https://sepolia.etherscan.io/tx/${swapHash}\n`)
+
+  // The two halves are independent, so a run that only redeposits has no swap to link. Naming the transaction
+  // that did happen beats an etherscan URL ending in `null`.
+  const closing = swapHash ?? increaseHash
+  const closingLabel = swapHash ? 'the swap' : 'the redeposit'
+  if (closing) console.log(`\nRebalanced. ${closingLabel}, https://sepolia.etherscan.io/tx/${closing}\n`)
+  else console.log('\nRebalanced. Nothing was broadcast, the book was already where this command aims.\n')
 }
 
 /** `approve(address,uint256)` payloads carry the spender in the first argument word. */

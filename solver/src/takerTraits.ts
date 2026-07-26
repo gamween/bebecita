@@ -25,7 +25,15 @@
  */
 import { concatHex, numberToHex, type Address, type Hex } from 'viem'
 
-/** The order the `TakerDataSlices` enum declares, which is the order the tail concatenates in. */
+/**
+ * The order the `TakerDataSlices` enum declares, which is the order the tail concatenates in.
+ *
+ * Documentation, deliberately, and not a lookup: nothing indexes this array, because `build` below writes the
+ * slices out positionally and an index computed from a name would be a second encoding of the same order.
+ * It is here because the header this file writes is eleven anonymous byte ranges, and the only way to check a
+ * slice index by eye against `node_modules/@1inch/swap-vm/src/libs/TakerTraits.sol` is to have the names in
+ * the same order next to them. Deleting it as unused would cost exactly that.
+ */
 export const TAKER_DATA_SLICES = [
   'Threshold',
   'To',

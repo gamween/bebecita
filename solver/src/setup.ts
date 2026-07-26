@@ -45,6 +45,7 @@ import { privateKeyToAccount } from 'viem/accounts'
 import { sepolia } from 'viem/chains'
 
 import { SEPOLIA, env } from './config.js'
+import { FULL_RANGE_TICK_LOWER, FULL_RANGE_TICK_UPPER } from './ticks.js'
 import { UniswapClient, type TransactionRequest } from './uniswap.js'
 
 const ROOT = resolve(import.meta.dirname, '../..')
@@ -54,16 +55,9 @@ const DEPLOYMENTS = resolve(ROOT, 'deployments/sepolia.json')
 const FEE = 3000
 const TICK_SPACING = 60
 
-/**
- * Full range, which is a deliberate choice and not laziness.
- *
- * At full range a unit of v4 liquidity is worth one unit of each token to within rounding, so the maker's
- * `unitsPerLiquidityE18` of 1e18 is an honest conversion factor rather than a tuned one, and the position can
- * never fall out of range and stop being reachable mid demo. `-887220` and `887220` are the extreme ticks
- * rounded to a multiple of 60.
- */
-const TICK_LOWER = -887220
-const TICK_UPPER = 887220
+/** Full range. The two numbers and the reasoning are in `solver/src/ticks.ts`, shared with the dashboard. */
+const TICK_LOWER = FULL_RANGE_TICK_LOWER
+const TICK_UPPER = FULL_RANGE_TICK_UPPER
 
 /** sqrtPriceX96 for a price of 1, which is what two freshly minted 18 decimal tokens are worth to each other. */
 const INITIAL_SQRT_PRICE_X96 = (2n ** 96n).toString()

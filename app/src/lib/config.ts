@@ -65,15 +65,23 @@ export interface DeploymentRecord {
   lastFill?: FillRecord
 
   /**
-   * Flat forms of the three fields above. The setup scripts nest them, older records and hand written ones do
-   * not, and reading both costs three lines where guessing wrong costs a dead button.
+   * Flat forms of the three fields above, for a hand written record only.
+   *
+   * Nothing in the pipeline writes these: `yarn setup` nests the position, `yarn aqua` and `yarn demo:reset`
+   * nest the strategy, and the checked in `deployments/sepolia.json` has neither key. They are kept because
+   * the record is a plain JSON file a judge is invited to point at their own deployment, and reading both
+   * shapes costs three lines where guessing wrong costs a dead button on a page whose whole job is to show
+   * that the chain agrees with the record.
+   *
+   * A fourth flat field, `takerTraitsAndData`, used to sit here and be passed to `quote()` verbatim when
+   * present. It was removed rather than documented: the taker traits carry the direction flag, so a stale blob
+   * silently overrode the direction toggle on the page and quoted the opposite side of the book. The traits
+   * are built per call by the port in `solver/src/takerTraits.ts`, which is the only thing a fill uses either.
    */
   tokenId?: string | number
   strategyHash?: Hex
   strategyHashes?: Hex[]
   order?: OrderRecord
-  /** A taker traits blob published by the solver, used verbatim when present. */
-  takerTraitsAndData?: Hex
 }
 
 export interface ChainRecord {

@@ -2,6 +2,7 @@ import { useState, useSyncExternalStore } from 'react'
 
 import { stringify } from '../lib/format'
 import { lastRateLimitRemaining, netlog, type NetEntry } from '../lib/netlog'
+import { LP_HOST } from '../lib/uniswap'
 import { Panel } from './primitives'
 
 /**
@@ -93,7 +94,7 @@ export function NetworkPanel() {
       title="Uniswap API traffic"
       meta={
         <div className="row">
-          <span className="faint mono">liquidity.api.uniswap.org</span>
+          <span className="faint mono">{LP_HOST.replace('https://', '')}</span>
           {remaining ? (
             <span className="chip" title="x-ratelimit-remaining on the most recent response that carried it">
               <span className="led" /> {remaining} requests left
