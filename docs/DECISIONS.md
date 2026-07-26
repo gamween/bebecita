@@ -141,7 +141,67 @@ rebalance entry point to the vault was considered and rejected on cost rather th
 immutable, so a redeploy cascades into transferring the position NFT and re-shipping every strategy, which is a
 large price for an entry point that already exists in a more general form.
 
+## Vendor two Uniswap core libraries rather than depend on v4
+
+`contracts/src/libraries/LiquidityAmounts.sol` carries `TickMath` and `LiquidityAmounts`, copied from the
+Uniswap core routines and unmodified in behaviour. Guard five cannot be written without them: pricing what an
+unwind released means converting liquidity to per token amounts at the live pool price, and that is tick math.
+
+Importing was tried first and there is nothing to import. The only Uniswap package this repository's
+`node_modules` carries is `@uniswap/permit2-sdk`, which is TypeScript, and `remappings.txt` has five entries,
+none of them v4. Adding v4-core or v4-periphery would pull a Solidity dependency graph an order of magnitude
+larger than this project onto a build that already pays 3 min 49 to `via_ir`, and would pin this repository to
+a v4 release train it otherwise has no reason to follow, all for two pure functions.
+
+The condition that makes this decision wrong is worth stating, because vendoring usually is wrong. It is
+acceptable here only while the copy is checked and small: two libraries, four functions, no storage, no
+external calls, and `contracts/test/LiquidityAmounts.t.sol` asserting sixteen cases against published constants
+and the range boundaries. If this project ever needed a third routine, the correct move is the dependency, not
+a third copy.
+
+## Two reachable accessors, not one
+
+`reachableFromPosition()` returns a scalar in the instruction's own units. `reachableAmounts(PoolKey)` returns
+both tokens priced at the live pool. They answer the same question and they are deliberately both kept.
+
+The instruction cannot afford the honest one. `0x92` runs on every quote and every fill, and making it read
+`StateView.getSlot0` and the position's tick bounds would put two external reads on the critical path for a
+number the guards verify after the fact anyway. So `0x92` uses `unitsPerLiquidityE18`, a maker parameter, and
+`reachableFromPosition()` exists to report exactly what the instruction computed. Its job is to agree with the
+VM, not to be right.
+
+The vault cannot use the cheap one for guard five. A scalar in the maker's own units cannot be compared against
+two realised token balances, which is precisely why guard five did not exist until `reachableAmounts` did.
+
+Keeping both turns the maker's staleness into a measurement. `unitsPerLiquidityE18` is exact at ship time and
+decays as the pool moves; `reachableAmounts` does not decay. Two `cast call`s at any block give the gap, and
+the fix is to re-ship with the measured factor and `setRiskParams` to match. Collapsing them would not remove
+the drift, it would remove the instrument.
+
+## Deploy the app, with the proxies, rather than a static build
+
+The dashboard's two most load bearing behaviours both go through a proxy: the Uniswap LP calls, which carry an
+`x-api-key` that must never reach a bundle, and the chain reads. Locally those are Vite middleware, which is
+fine and invisible.
+
+A plain static host for `app/dist` was the cheap option and it was rejected, because it produces the worst
+possible artefact: a page that looks exactly like the project, with an API panel returning 401 and a network
+panel proving nothing. A judge opening that link would conclude the integration was decorative, and would be
+reasoning correctly from what they were shown.
+
+So both proxies exist twice. `api/uniswap.ts` and `api/rpc.ts` are the serverless halves, and the deployed site
+is the same app rather than a demo of it. The two response headers the proxy sets, `x-bebecita-upstream` and
+`x-bebecita-api-key`, are what let anyone check that from a terminal instead of taking the panel's word for it,
+and `docs/SUBMISSION.md` carries those two commands.
+
 ## Ruled out on purpose
+
+Two fills in one transaction, planned as T5 in `docs/PLAN.md`. A taker contract calling `swap()` twice on two
+strategy hashes of the same maker would have been the loudest ten seconds available, and it was ranked below the
+audit that produced guard five, which closed a path draining the position with all four original guards green.
+It is also theatre with no mechanism of ours in it: the reentrancy guard being keyed by order hash is the
+sponsor's property. Nothing partial was left behind, there is no taker contract, and no transaction on the
+router carries two `Swapped` events.
 
 The instruction as a wrapper with a nested `runLoop`. Four hours on the only component of the critical path,
 for a gain invisible on screen, when guard one already enforces a floor.
