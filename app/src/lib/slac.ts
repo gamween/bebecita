@@ -1,4 +1,5 @@
 import { ok, unavailable, type Result } from './format'
+import { NOT_READ_YET } from './readiness'
 import type { Snapshot } from './state'
 
 /**
@@ -57,7 +58,7 @@ function ratioOf(numerator: Result<SlacNumerator>, denominator: Result<bigint>):
   if (!denominator.ok) return unavailable(denominator.reason)
   if (denominator.value === 0n) {
     return unavailable(
-      'undefined, the denominator is zero: the vault holds no free tokens at all, so there is no wallet equity to divide by',
+      'the denominator is zero: the vault holds no free tokens at all, so there is no wallet equity to divide by',
     )
   }
   return ok(Number((numerator.value.total * SCALE) / denominator.value) / Number(SCALE))
@@ -75,7 +76,7 @@ function sum(...values: Result<bigint>[]): Result<bigint> {
 /** Both readings, from one snapshot. Nothing here reads the chain: the snapshot already did. */
 export function slacOf(snapshot: Snapshot | null): Slac {
   if (!snapshot) {
-    const pending = unavailable<never>('not read yet')
+    const pending = unavailable<never>(NOT_READ_YET)
     return { numerator: pending, bare: { denominator: pending, ratio: pending }, reachable: { denominator: pending, ratio: pending } }
   }
 
