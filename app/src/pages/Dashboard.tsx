@@ -25,12 +25,15 @@ import { amount as fmtAmount, exact, integer, reason, shortAddress, type Result 
 import { lastRateLimitRemaining, netlog } from '../lib/netlog'
 import { orderFrom, requestQuote, type QuoteResult } from '../lib/quote'
 import { NOT_READ_YET, readinessOf } from '../lib/readiness'
+import { readFillReceipt, type FillReceipt } from '../lib/receipt'
 import { readSnapshot, tokenOf, type Snapshot } from '../lib/state'
 import { txIdle, useTx, type TxState } from '../lib/tx'
 import { claimFees, findTransactionRequest, poolInfo, type TransactionRequest } from '../lib/uniswap'
 
 const MINT_AMOUNT = 10_000n * 10n ** 18n
 const STATE_POLL_MS = 5_000
+/** Said by the disabled reason and by the click handler both, so the tooltip and the error card cannot disagree. */
+const NO_ROUTER = 'The deployment record carries no router address, so there is nothing to quote against.'
 /** The Uniswap key allows six requests a second. One pool_info per press of Refresh, never on the timer. */
 const POOL_INFO_MIN_GAP_MS = 15_000
 
@@ -46,6 +49,9 @@ const notRead: Result<never> = { ok: false, reason: NOT_READ_YET }
 
 /** Position liquidity is a 1e18 scaled quantity, so it reads as a number rather than as a 24 digit integer. */
 const liquidityText = (value: bigint) => fmtAmount(value < 0n ? -value : value, 18)
+
+/** Length of a hex payload in bytes, which is how the taker traits slices are measured everywhere else. */
+const hexBytes = (value: Hex) => (value.length - 2) / 2
 
 type Action<T> =
   | { status: 'idle' }
@@ -75,6 +81,151 @@ function ResultPanel({
   )
 }
 
+/**
+ * A fill as its own logs describe it. Nothing here is copied from what the page asked for.
+ *
+ * The two cards are the two hooks, in the order the VM runs them, and each one leads with the position's
+ * liquidity around its PositionManager call, because that movement is the whole Uniswap claim: an Aqua fill
+ * unwound a v4 position and put it back inside one transaction.
+ */
+function FillReceiptView({ receipt, snapshot }: { receipt: FillReceipt; snapshot: Snapshot | null }) {
+  const symbolOf = (address: Address | null | undefined) =>
+    address && snapshot ? tokenOf(snapshot, address).symbol : ''
+  const decimalsOf = (address: Address | null | undefined) =>
+    address && snapshot ? tokenOf(snapshot, address).decimals : 18
+
+  const decreased = receipt.positionCalls.find((call) => call.kind === 'decrease')
+  const increased = receipt.positionCalls.find((call) => call.kind === 'increase')
+
+  return (
+    <>
+      <dl className="kv">
+        <dt>transaction</dt>
+        <dd>
+          <TxLink hash={receipt.hash} />
+          <span className="unit">
+            {receipt.status === 'success' ? 'success' : 'reverted'}, block {integer(receipt.blockNumber)}, gas{' '}
+            {integer(receipt.gasUsed)}
+          </span>
+        </dd>
+        <dt>Swapped</dt>
+        <dd>
+          {receipt.swapped.ok ? (
+            <>
+              {fmtAmount(receipt.swapped.value.amountIn, decimalsOf(receipt.swapped.value.tokenIn))}{' '}
+              {symbolOf(receipt.swapped.value.tokenIn)} in,{' '}
+              {fmtAmount(receipt.swapped.value.amountOut, decimalsOf(receipt.swapped.value.tokenOut))}{' '}
+              {symbolOf(receipt.swapped.value.tokenOut)} out
+              <span className="unit">taker {shortAddress(receipt.swapped.value.taker)}</span>
+            </>
+          ) : (
+            <Missing reason={receipt.swapped.reason} />
+          )}
+        </dd>
+        <dt>orderHash</dt>
+        <dd className="faint">
+          {receipt.swapped.ok ? receipt.swapped.value.orderHash : <Missing reason={receipt.swapped.reason} />}
+        </dd>
+      </dl>
+
+      <div className="calls">
+        <div className="call">
+          <div className="call-head">
+            <span className="call-index">1</span> preTransferOut, the unwind
+            <span className="note">the /lp/decrease payload, executed by the vault against the PositionManager</span>
+          </div>
+          <dl className="kv">
+            <dt>liquidity</dt>
+            <dd>
+              {receipt.liquidity.ok ? (
+                <>
+                  {liquidityText(receipt.liquidity.value.beforeUnwind)} to{' '}
+                  {liquidityText(receipt.liquidity.value.afterUnwind)}
+                  {decreased ? <span className="unit">delta -{liquidityText(decreased.liquidityDelta)}</span> : null}
+                </>
+              ) : (
+                <Missing reason={receipt.liquidity.reason} />
+              )}
+            </dd>
+            <dt>released</dt>
+            <dd>
+              {receipt.unwound.ok ? (
+                <>
+                  {fmtAmount(receipt.unwound.value.released, decimalsOf(receipt.unwound.value.token))}{' '}
+                  {symbolOf(receipt.unwound.value.token)}
+                  <span className="unit">
+                    against {fmtAmount(receipt.unwound.value.required, decimalsOf(receipt.unwound.value.token))} owed,
+                    the surplus stays as float
+                  </span>
+                </>
+              ) : (
+                <Missing reason={receipt.unwound.reason} />
+              )}
+            </dd>
+          </dl>
+        </div>
+        <div className="call">
+          <div className="call-head">
+            <span className="call-index">2</span> postTransferIn, the redeposit
+            <span className="note">the /lp/increase payload, same transaction, after the taker was paid</span>
+          </div>
+          <dl className="kv">
+            <dt>liquidity</dt>
+            <dd>
+              {receipt.redeposited.ok ? (
+                <>
+                  {liquidityText(receipt.redeposited.value.liquidityBefore)} to{' '}
+                  {liquidityText(receipt.redeposited.value.liquidityAfter)}
+                  {increased ? <span className="unit">delta +{liquidityText(increased.liquidityDelta)}</span> : null}
+                </>
+              ) : (
+                <Missing reason={receipt.redeposited.reason} />
+              )}
+            </dd>
+            <dt>PoolManager</dt>
+            <dd>
+              {receipt.positionCalls.length ? (
+                <>
+                  {receipt.positionCalls.length} ModifyLiquidity
+                  <span className="unit">
+                    sent by {shortAddress(receipt.positionCalls[0].sender)}, the position manager
+                  </span>
+                </>
+              ) : (
+                <Missing reason="no ModifyLiquidity event in this receipt" />
+              )}
+            </dd>
+          </dl>
+        </div>
+      </div>
+    </>
+  )
+}
+
+/** The calldata the API built for one request, and whether it is aimed where the vault will accept it. */
+function TxRequestView({ tx, expected }: { tx: TransactionRequest; expected: Address | null }) {
+  const pinned = expected ? tx.to.toLowerCase() === expected.toLowerCase() : false
+  return (
+    <dl className="kv">
+      <dt>to</dt>
+      <dd>
+        <Addr value={tx.to} />
+        <span className="unit">
+          {!expected
+            ? 'no position manager in the record to compare against'
+            : pinned
+              ? 'matches the position manager the vault pins'
+              : 'not the pinned position manager, the vault would reject this'}
+        </span>
+      </dd>
+      <dt>selector</dt>
+      <dd>{tx.data.slice(0, 10)}</dd>
+      <dt>calldata</dt>
+      <dd className="faint">{tx.data}</dd>
+    </dl>
+  )
+}
+
 export function Dashboard({ config }: { config: AppConfig | null }) {
   const { address, chainId: walletChainId, status: walletStatus } = useConnection()
   const { data: walletClient } = useWalletClient()
@@ -92,6 +243,7 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
   const [fill, setFill] = useState<Action<FillResult>>(idle)
   const [fillTx, setFillTx] = useState<TxState>(txIdle)
   const [claim, setClaim] = useState<Action<{ tx: TransactionRequest }>>(idle)
+  const [receipt, setReceipt] = useState<Action<FillReceipt>>(idle)
   const [taker, setTaker] = useState<{ balance: bigint; allowance: bigint } | null>(null)
 
   const mintTx = useTx()
@@ -174,6 +326,9 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
   const vaultAddress = config?.deployment.vault ?? null
   const router = config?.deployment.router ?? null
   const positionManager = config?.deployment.positionManager ?? config?.chain.positionManager ?? null
+  // Both only feed the receipt read-back, which filters the two ModifyLiquidity events by emitter and by pool.
+  const poolManager = config?.chain.poolManager ?? config?.deployment.poolManager ?? null
+  const poolId = snapshot?.uniswap.poolId ?? config?.deployment.pool?.poolId ?? null
   const orderResult = config ? orderFrom(config.deployment) : null
 
   const refreshTaker = useCallback(async () => {
@@ -191,6 +346,24 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
   useEffect(() => {
     void refreshTaker()
   }, [refreshTaker, snapshot?.at])
+
+  /**
+   * The fill `deployments/sepolia.json` records, decoded from its own logs, so a cold load already shows a
+   * completed fill on this vault before anybody presses anything. A fill run in this tab replaces it.
+   *
+   * The ref and not the state is what makes this run once. Reading a status the effect itself writes would
+   * either loop or cancel its own request on the re-render the pending state causes.
+   */
+  const seededReceipt = useRef(false)
+  useEffect(() => {
+    const recorded = config?.deployment.lastFill?.txHash ?? null
+    if (!recorded || seededReceipt.current || !router || !vaultAddress) return
+    seededReceipt.current = true
+    setReceipt({ status: 'pending' })
+    readFillReceipt(recorded, { router, vault: vaultAddress, poolManager, positionManager, poolId })
+      .then((value) => setReceipt({ status: 'ok', value }))
+      .catch((error) => setReceipt({ status: 'error', message: describeError(error) }))
+  }, [config, poolId, poolManager, positionManager, router, vaultAddress])
 
   const mintReset = mintTx.reset
   const approveReset = approveTx.reset
@@ -233,7 +406,15 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
       : false
 
   const onQuote = useCallback(async () => {
-    if (!config?.deployment.router || !orderResult) return
+    // Both of these used to return bare, so the press did nothing and said nothing about it.
+    if (!config?.deployment.router) {
+      setQuote({ status: 'error', message: NO_ROUTER })
+      return
+    }
+    if (!orderResult) {
+      setQuote({ status: 'error', message: 'Deployment is not ready.' })
+      return
+    }
     if (!orderResult.ok) {
       setQuote({ status: 'error', message: orderResult.reason })
       return
@@ -264,8 +445,11 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
     | { ok: false; reason: string } => {
     if (!config || !snapshot) return { ok: false, reason: 'Chain state is still loading.' }
     if (!takerAddress) return { ok: false, reason: 'Connect a wallet to continue.' }
-    if (wrongChain) return { ok: false, reason: 'Switch your wallet to Ethereum Sepolia.' }
-    if (!walletClient) return { ok: false, reason: 'Wallet is not ready yet.' }
+    // A simulation signs nothing. It runs on `publicClient`, which is pinned to Sepolia, so neither the wallet's
+    // chain nor the wallet client itself is in the way of one, and blocking on them made the toggle useless to
+    // anyone whose wallet was on another network.
+    if (!dryRun && wrongChain) return { ok: false, reason: 'Switch your wallet to Ethereum Sepolia.' }
+    if (!dryRun && !walletClient) return { ok: false, reason: 'Wallet is not ready yet.' }
     if (parsedAmount === null || parsedAmount <= 0n) return { ok: false, reason: 'Enter a valid amount.' }
     if (!orderResult) return { ok: false, reason: 'Deployment is not ready.' }
     if (!orderResult.ok) return { ok: false, reason: orderResult.reason }
@@ -275,6 +459,13 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
     if (!snapshot.vault.unitsPerLiquidityE18.ok) return { ok: false, reason: 'Liquidity data is unavailable.' }
     if (!snapshot.vault.maxUnwindPct.ok) return { ok: false, reason: 'Position limit is unavailable.' }
     if (!snapshot.vault.haircutBps.ok) return { ok: false, reason: 'Safety margin is unavailable.' }
+    // Both of these are already on screen in the sidebar, and both apply to a simulation too: the simulated
+    // `swap()` pulls the input token through the router exactly as the real one does. Checking them here is
+    // what keeps a press that cannot settle from spending a /lp/decrease and a /lp/increase on the way to
+    // finding out. The wording is the sidebar's, so the chip and this note say the same thing.
+    if (!taker) return { ok: false, reason: 'Balance and allowance have not been read for this wallet yet.' }
+    if (!hasBalance) return { ok: false, reason: `Top up required, press Mint ${inSymbol} first.` }
+    if (!hasAllowance) return { ok: false, reason: 'Approval required, press Approve the router first.' }
 
     return {
       ok: true,
@@ -282,12 +473,14 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
         amount: parsedAmount,
         isAToB: aToB,
         taker: takerAddress,
-        wallet: walletClient,
+        wallet: walletClient ?? null,
         order: orderResult.value,
         orderHash: config.deployment.strategy?.orderHash ?? config.deployment.strategyHash,
         router,
         vault: vaultAddress,
         positionManager,
+        poolManager,
+        poolId,
         tokenId,
         token0,
         token1,
@@ -303,11 +496,17 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
     chainId,
     config,
     dryRun,
+    hasAllowance,
+    hasBalance,
+    inSymbol,
     orderResult,
     parsedAmount,
+    poolId,
+    poolManager,
     positionManager,
     router,
     snapshot,
+    taker,
     takerAddress,
     token0,
     token1,
@@ -347,6 +546,9 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
           gasUsed: value.gasUsed,
         })
       }
+      // The fill already read its own receipt back, so the panel below moves off the recorded fill and onto
+      // this one without a second request.
+      if (value.receipt) setReceipt({ status: 'ok', value: value.receipt })
       void refresh()
       void refreshTaker()
     } catch (error) {
@@ -397,6 +599,9 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
 
   const onExecuteClaim = useCallback(() => {
     if (claim.status !== 'ok' || !claim.value.tx || !vaultAddress || !takerAddress || !walletClient) return
+    // Mint and approve both refuse on the wrong chain. Without the same guard here viem answers with its own
+    // chain mismatch string, which names two chain ids and no fix.
+    if (wrongChain) return
     const data = claim.value.tx.data as Hex
     void executeTx.send(
       () =>
@@ -410,15 +615,17 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
         }),
       { onConfirmed: () => void refresh() },
     )
-  }, [claim, executeTx, refresh, takerAddress, vaultAddress, walletClient])
+  }, [claim, executeTx, refresh, takerAddress, vaultAddress, walletClient, wrongChain])
 
   const quoteDisabledReason = !config
     ? 'Addresses are still loading.'
-    : parsedAmount === null || parsedAmount <= 0n
-      ? 'Enter a valid amount.'
-      : orderResult && !orderResult.ok
-        ? orderResult.reason
-        : null
+    : !config.deployment.router
+      ? NO_ROUTER
+      : parsedAmount === null || parsedAmount <= 0n
+        ? 'Enter a valid amount.'
+        : orderResult && !orderResult.ok
+          ? orderResult.reason
+          : null
 
   return (
     <StatedReasonsProvider value={readiness.statedSet}>
@@ -581,9 +788,22 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
                   className="btn primary"
                   onClick={() => void onFill()}
                   disabled={fill.status === 'pending' || !fillInputs.ok}
-                  title={fillInputs.ok ? 'Execute with your connected wallet.' : fillInputs.reason}
+                  title={
+                    fillInputs.ok
+                      ? dryRun
+                        ? 'Simulate against live state. Nothing is signed and nothing is broadcast.'
+                        : 'Execute with your connected wallet.'
+                      : fillInputs.reason
+                  }
                 >
-                  {fill.status === 'pending' ? 'Executing…' : dryRun ? 'Simulate' : 'Swap'}
+                  <span className="button-step">3</span>
+                  {fill.status === 'pending'
+                    ? dryRun
+                      ? 'Simulating…'
+                      : 'Executing…'
+                    : dryRun
+                      ? 'Simulate'
+                      : 'Run a fill'}
                 </button>
                 <label className="toggle" title="Preview the fill without broadcasting a transaction.">
                   <input type="checkbox" checked={dryRun} onChange={(event) => setDryRun(event.target.checked)} />
@@ -637,7 +857,7 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
                     ? 'Confirm in wallet'
                     : approveTx.state.status === 'pending'
                       ? 'Approving…'
-                      : 'Approve'}
+                      : 'Approve the router'}
                 </button>
               </div>
             </aside>
@@ -650,17 +870,21 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
               disabled={refreshing || !config}
               title="Read the chain again, and ask the Uniswap API about this pool. No wallet and no gas."
             >
-              {refreshing ? 'Refreshing…' : 'Refresh'}
+              {refreshing ? 'Refreshing…' : 'Refresh state'}
             </button>
-            {isVaultOwner && tokenId !== null ? (
-              <button
-                className="btn small ghost"
-                onClick={() => void onClaimFees()}
-                disabled={claim.status === 'pending'}
-              >
-                Claim LP fees
-              </button>
-            ) : null}
+            {/*
+             * Not gated on ownership. The request itself is a real authenticated call to /lp/claim_fees and
+             * anybody may make it, which is the part that proves the integration. Only the write it returns
+             * needs the vault owner, and that gate sits on the button in the panel below.
+             */}
+            <button
+              className="btn small ghost"
+              onClick={() => void onClaimFees()}
+              disabled={claim.status === 'pending'}
+              title="Ask the Uniswap API for the fee claim calldata. No wallet and no gas."
+            >
+              Claim LP fees
+            </button>
           </div>
         </section>
 
@@ -726,32 +950,109 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
                   </div>
                   <div className="client-result-link">
                     {fill.value.transactionHash ? (
-                      <TxLink hash={fill.value.transactionHash} />
+                      <>
+                        <TxLink hash={fill.value.transactionHash} />{' '}
+                        <span className="faint">
+                          {fill.value.receipt?.swapped.ok
+                            ? 'the two figures above are the Swapped event in this receipt, read back off the chain'
+                            : 'the Swapped event could not be decoded, so the two figures above are the simulation'}
+                        </span>
+                      </>
                     ) : (
-                      <span>Simulation completed. Nothing was broadcast.</span>
+                      <span>
+                        Simulation completed. Nothing was broadcast, so these two figures are what the VM returned.
+                      </span>
                     )}
                   </div>
+
+                  {/*
+                   * The Uniswap half of the transaction the visitor just signed. Both calldatas were built by
+                   * the API a second earlier and went into the taker traits verbatim, and this is the only
+                   * place on the page that says so about this specific fill.
+                   */}
+                  <details className="result-disclosure">
+                    <summary>
+                      <span>What went into this transaction</span>
+                      <span className="summary-action">the calldata</span>
+                    </summary>
+                    <dl className="kv">
+                      <dt>unwind</dt>
+                      <dd>
+                        {fill.value.unwindPercent} percent
+                        <span className="unit">
+                          what /lp/decrease was asked to release, rounded up because the API takes integers
+                        </span>
+                      </dd>
+                      <dt>taker traits</dt>
+                      <dd>
+                        {integer(hexBytes(fill.value.takerTraitsAndData))} bytes
+                        <span className="unit">the traits word, then the two calldatas in their two slices</span>
+                      </dd>
+                      <dt>/lp/decrease</dt>
+                      <dd>
+                        {fill.value.decreaseCalldata.slice(0, 10)}
+                        <span className="unit">
+                          {integer(hexBytes(fill.value.decreaseCalldata))} bytes, run by the vault in preTransferOut
+                        </span>
+                        <span className="calldata">{fill.value.decreaseCalldata}</span>
+                      </dd>
+                      <dt>/lp/increase</dt>
+                      <dd>
+                        {fill.value.increaseCalldata.slice(0, 10)}
+                        <span className="unit">
+                          {integer(hexBytes(fill.value.increaseCalldata))} bytes, run by the vault in postTransferIn
+                        </span>
+                        <span className="calldata">{fill.value.increaseCalldata}</span>
+                      </dd>
+                    </dl>
+                  </details>
                 </>
               ) : null}
             </Panel>
           ) : null}
 
-          {isVaultOwner ? (
-            <ResultPanel title="LP fees" state={claim}>
-              {claim.status === 'ok' ? (
+          <ResultPanel
+            title={
+              fill.status === 'ok' && receipt.status === 'ok' && fill.value.transactionHash === receipt.value.hash
+                ? 'This fill, decoded from its own receipt'
+                : 'The last fill on this vault, decoded from its own receipt'
+            }
+            state={receipt}
+          >
+            {receipt.status === 'ok' ? <FillReceiptView receipt={receipt.value} snapshot={snapshot} /> : null}
+          </ResultPanel>
+
+          <ResultPanel title="LP fees, POST /lp/claim_fees" state={claim}>
+            {claim.status === 'ok' ? (
+              <>
+                <TxRequestView tx={claim.value.tx} expected={positionManager} />
                 <div className="claim-ready">
                   <button
                     className="btn primary small"
                     onClick={onExecuteClaim}
-                    disabled={executeTx.busy || !walletClient}
+                    disabled={executeTx.busy || !walletClient || !isVaultOwner || wrongChain}
+                    title={
+                      isVaultOwner
+                        ? 'Sends vault.executeOnPositionManager with the calldata the API built.'
+                        : 'executeOnPositionManager is onlyOwner, so this needs the vault owner in the wallet.'
+                    }
                   >
                     Confirm fee claim
                   </button>
                   <TxStatus state={executeTx.state} label="claim" />
+                  {/* The request above is the integration. Only the write needs the deployer, and it says why. */}
+                  {!isVaultOwner ? (
+                    <span className="faint">
+                      The calldata is real and yours to inspect. Executing it needs the vault owner, because
+                      executeOnPositionManager is onlyOwner.
+                    </span>
+                  ) : wrongChain ? (
+                    <span className="faint">Switch your wallet to Ethereum Sepolia to execute this.</span>
+                  ) : null}
                 </div>
-              ) : null}
-            </ResultPanel>
-          ) : null}
+              </>
+            ) : null}
+          </ResultPanel>
         </section>
 
         <section className="evidence" aria-label="Maker state">
@@ -924,7 +1225,8 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
                 {netRemaining ? `, ${netRemaining} requests left on the key` : ''}
               </small>
             </span>
-            <span className="summary-action">Show the raw calls</span>
+            {/* The verb lives on `.summary-action::before` and flips on open, so it is not typed here. */}
+            <span className="summary-action">the raw calls</span>
           </summary>
           <NetworkPanel />
         </details>
