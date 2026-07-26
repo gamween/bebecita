@@ -23,9 +23,14 @@ The maker's inventory, opened through the Uniswap API and owned by the vault:
 |---|---|
 | Position | v4 NFT [`#37804`](https://sepolia.etherscan.io/token/0x429ba70129df741B2Ca2a85BC3A2a3328e5c09b4?a=37804), full range, 100,000 of each token |
 | Pool | `0x25f7dd131e5548b22a4bf9b95587514d69960261c1defff0ec465f9f90d54489`, fee 3000, spacing 60, no hook |
-| Reachable per fill | 21,453.97 bALPHA, which is 25% of the position after a 5% haircut. `getEffectiveLiquidity` reports the same figure on that side and 26,535.12 bBRAVO on the other, because the pool no longer sits at parity |
+| Reachable per fill | 25% of the position after a 5% haircut. Read on chain at block 11351549: **21,237.22 bALPHA** and **26,267.04 bBRAVO**, which differ because the pool no longer sits at parity. `getEffectiveLiquidity` reports each of those plus the vault's free float on that side |
 | Aqua strategy | `0x5558177a9c2fafbf360d32c575576bac9cd7603b1d52c91821b0a08fe9015207` |
 | Program | `[0x92 unwind][0x51 concentrate][0x02 salt]`, 142 bytes, the curve bounded by the position's own range |
+
+Every address and hash above is read out of [`deployments/sepolia.json`](deployments/sepolia.json), which the
+deploy, setup and fill scripts write and which the app and the solver read at runtime. That file is the source
+of truth. This table exists because a reader needs the addresses in the first screen; anywhere else in these
+documents, the file is pointed at rather than copied.
 
 The vault has been deployed three times, and both redeployments are for the same reason: what a taker needs
 to be able to read off an immutable maker cannot live behind a setter. The first was constructed before the
@@ -204,8 +209,9 @@ The Uniswap API accepts chainId `11155111`, and Uniswap's own FAQ states there i
 | Bebecita fill, including both PositionManager calls | 323,264 to 357,464 |
 | A bare Aqua fill on the same curve, for reference | about 100,000 |
 
-Measured on Sepolia, from the receipts of six real fills. The spread comes from whether the redeposit finds an
-existing position tick range warm.
+Measured on Sepolia, from the receipts of every fill this router has ever settled: seventeen of them, enumerated
+from the router's own `Swapped` logs. The spread comes from whether the redeposit finds an existing position
+tick range warm, and the top of it is the very first fill, which paid to open one.
 
 The overhead is the honest cost of the design: every fill carries a decrease and an increase against the v4
 PositionManager, on top of the swap itself. It is worth naming rather than hiding, because it is also what
@@ -290,16 +296,15 @@ router, one byte of difference in a no-op instruction.
 | Swapped | 1,000 bBRAVO in, 912.676854023977327256 bALPHA out |
 | Unwind | 2% of the position, released 1,806.65 bALPHA and 2,234.54 bBRAVO against 912.68 owed, all of it into the vault, which is what guard 5 now checks |
 | Redeposit | liquidity back from 98,452.54 to 99,446.80 in the same transaction |
-| Gas | 340,599, against 343,942 before the guard, because the fill sizes its own unwind |
+| Gas | 340,599 |
 | Taker | the deployer on this run; the dashboard fills from whatever wallet is connected, and the guards do not care which |
 
-That fill is the first one to run against all five guards, and it costs no more than the four did. The two
-extra reads the conservation guard makes, `getPoolAndPositionInfo` and `getSlot0`, are worth about 15,000 gas
-on a fill that already carries two PositionManager calls.
-
-That taker is not the deployer and holds nothing but what it minted itself, which is the point of the two
-buttons on the dashboard: the fill is signed by whoever is connected, and the maker's guards do not care who
-that is.
+That fill is the first one to run against all five guards, and the guard is not free. The fill immediately
+before it, [`0xad08b75c…`](https://sepolia.etherscan.io/tx/0xad08b75ca46bdce8a492ae213d39e1e988b754fa751547d73f57bcbb34a8c311),
+took the same 2% unwind under four guards and cost 326,914. So the two extra reads the conservation guard
+makes, `getPoolAndPositionInfo` and `getSlot0`, cost **13,685 gas**, about 4% on a fill that already carries two
+PositionManager calls. That is the price of the hole it closes, and it is worth naming rather than rounding to
+nothing.
 
 The first fill this project ever ran is
 [`0xe0a395b7…`](https://sepolia.etherscan.io/tx/0xe0a395b72e3ac659b226712a963b23c1173d2ccf3f9e95d84b028494a67bcc84),
@@ -317,8 +322,10 @@ yarn rebalance --dry          # size it against live state, call the API for rea
 
 A fill is not balance neutral for the maker and it never was. `/lp/decrease` returns both tokens pro rata, the
 fill pays the taker in one of them and is paid in the other, and the redeposit is two sided and therefore
-capped by whichever token the maker keeps selling. Fifteen fills put **39.85%** of the removed liquidity back,
-left **23,947 bBRAVO** of free float in the vault, and took the position from 100,000 of liquidity to 92,140.
+capped by whichever token the maker keeps selling. Counted off the receipts, the first fourteen fills put
+**42.50%** of the removed liquidity back, left **21,859.61 bBRAVO** of free float in the vault, and took the
+position from 100,000 of liquidity to **92,140.39**. That is the state `yarn rebalance` was run against, and
+`deployments/sepolia.json` records it under `rebalance.before`.
 That is what one directional flow does to any market maker rather than something this design does to itself,
 and the answer has always been the same one: trade the inventory home, and charge a spread that covers doing
 so.
@@ -336,6 +343,8 @@ token against a pool priced where that sale left it, which is the same trap one 
 maker parameter it moves, and [docs/DECISIONS.md](docs/DECISIONS.md) for why this is not inside the fill.
 
 ## Frontend
+
+Deployed and public: **https://bebecita-fh121iw64-gamween-7559s-projects.vercel.app**
 
 ```bash
 cd app && yarn install && yarn dev     # http://localhost:5173, and nothing else
@@ -360,10 +369,12 @@ The connected wallet is the taker, so it needs the input token and an allowance 
 button away, **Mint** and **Approve the router**, because `TestERC20.mint` is public. A judge can drive the
 demo from their own wallet without asking anyone for anything.
 
-There is one port and no backend. The dev server proxies two things and runs none of this project's logic: it
-attaches the Uniswap key to `/api/uniswap` so the key never reaches the bundle, and it forwards JSON-RPC on
-`/api/rpc` so a private endpoint can stay out of it. The Uniswap gateway answers browser preflights on the
-`/lp/*` paths, so a build that carries its own key can call it with no proxy at all.
+There is one port and no backend. Two proxies exist and neither runs any of this project's logic: one attaches
+the Uniswap key to `/api/uniswap` so the key never reaches the bundle, the other forwards JSON-RPC on
+`/api/rpc` so a private endpoint can stay out of it. Locally they are Vite middleware; in production they are
+the two serverless functions in `api/`, so the deployed site is the same app rather than a crippled build. The
+Uniswap gateway answers browser preflights on the `/lp/*` paths, so a build that carries its own key can call
+it with no proxy at all. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section Deployment.
 
 ### Why there is no solver process, and why one would not be a weakness either
 
