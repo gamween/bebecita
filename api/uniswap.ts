@@ -22,8 +22,16 @@ function upstreamFor(path: string): string {
 
 export default async function handler(request: Request): Promise<Response> {
   const url = new URL(request.url)
-  const path = url.pathname.replace(/^\/api\/uniswap/, '') || '/'
-  const upstream = upstreamFor(path) + url.search
+
+  // The path arrives as a query parameter rather than as a path segment. A catch-all filename would read
+  // better, but this project has no framework, and Vercel does not resolve the bracketed catch-all convention
+  // in a plain functions directory: every request under /api/uniswap/... answered 404 until the rewrite in
+  // vercel.json made the path explicit. Being boring here is worth more than being idiomatic.
+  const path = `/${(url.searchParams.get('path') ?? '').replace(/^\/+/, '')}`
+  if (path === '/') {
+    return Response.json({ error: 'no upstream path given' }, { status: 400 })
+  }
+  const upstream = upstreamFor(path)
 
   const apiKey = process.env.UNISWAP_API_KEY ?? ''
 
