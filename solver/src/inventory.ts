@@ -18,8 +18,9 @@
  * The closing panel compares the drift the fills accumulated against the float the vault holds now. The gap
  * between those two is exactly what a rebalance took out of the book and put back to work.
  *
- * `solver/src/fill.ts` can print the same line for a single fill by importing `driftOf` below, which takes a
- * receipt and returns the same numbers this table is built from.
+ * `driftOf` below is the one piece of that worth lifting out: it takes a receipt and returns the same numbers
+ * this table is built from, for a single fill. Nothing imports it yet, and it is internal to this command
+ * until something does.
  */
 import {
   createPublicClient,
