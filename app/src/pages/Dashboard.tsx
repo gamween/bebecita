@@ -21,7 +21,16 @@ import { CHAIN } from '../lib/client'
 import type { AppConfig } from '../lib/config'
 import { describeError } from '../lib/errors'
 import { approveRouter, mintTo, readTakerPosition, runFill, type FillResult } from '../lib/fill'
-import { amount as fmtAmount, exact, integer, reason, shortAddress, type Result } from '../lib/format'
+import {
+  amount as fmtAmount,
+  exact,
+  integer,
+  ok,
+  reason,
+  shortAddress,
+  unavailable,
+  type Result,
+} from '../lib/format'
 import { lastRateLimitRemaining, netlog } from '../lib/netlog'
 import { orderFrom, requestQuote, type QuoteResult } from '../lib/quote'
 import { NOT_READ_YET, readinessOf } from '../lib/readiness'
@@ -36,6 +45,11 @@ const STATE_POLL_MS = 5_000
 const NO_ROUTER = 'The deployment record carries no router address, so there is nothing to quote against.'
 /** The Uniswap key allows six requests a second. One pool_info per press of Refresh, never on the timer. */
 const POOL_INFO_MIN_GAP_MS = 15_000
+/**
+ * The two selectors `BebecitaVault._callPositionManager` accepts, `modifyLiquidities` and its no-unlock form,
+ * as `contracts/src/vault/BebecitaVault.sol:115-117` declares them. Anything else is refused on chain.
+ */
+const POSITION_MANAGER_SELECTORS = ['0xdd46508f', '0x4afe393c']
 
 /**
  * The canonical Aqua, as `solver/src/config.ts` and README.md name it.
@@ -52,6 +66,9 @@ const liquidityText = (value: bigint) => fmtAmount(value < 0n ? -value : value, 
 
 /** Length of a hex payload in bytes, which is how the taker traits slices are measured everywhere else. */
 const hexBytes = (value: Hex) => (value.length - 2) / 2
+
+/** What the connected wallet holds and has approved, for the input token of the direction on screen. */
+type TakerPosition = Awaited<ReturnType<typeof readTakerPosition>>
 
 type Action<T> =
   | { status: 'idle' }
@@ -202,9 +219,34 @@ function FillReceiptView({ receipt, snapshot }: { receipt: FillReceipt; snapshot
   )
 }
 
+/**
+ * Why the vault would refuse a payload the API built, if it would.
+ *
+ * `findTransactionRequest` returns the first `{to,data}` pair anywhere in a response, and the LP endpoints nest
+ * more than one: a pair aimed at Permit2 decodes exactly as well as the PositionManager one.
+ * `BebecitaVault._callPositionManager` pins the callee and the selector both, so a payload that fails either
+ * test reverts, and it reverts after the owner has already signed it. `solver/src/fillPlan.ts:336-342` makes
+ * the same comparison on the two fill payloads before it encodes them, and this is the fee claim's copy of it.
+ */
+function positionManagerRefusal(tx: TransactionRequest | null, pinned: Address | null): string | null {
+  if (!tx) return null
+  if (!pinned) {
+    return 'The deployment record names no position manager, so this calldata cannot be checked against one.'
+  }
+  if (tx.to.toLowerCase() !== pinned.toLowerCase()) {
+    return `The API aimed this calldata at ${tx.to}, and the vault only forwards to ${pinned}, so it would revert.`
+  }
+  const selector = tx.data.slice(0, 10).toLowerCase()
+  if (!POSITION_MANAGER_SELECTORS.includes(selector)) {
+    return `The vault forwards modifyLiquidities and nothing else, and this calldata is ${selector}.`
+  }
+  return null
+}
+
 /** The calldata the API built for one request, and whether it is aimed where the vault will accept it. */
 function TxRequestView({ tx, expected }: { tx: TransactionRequest; expected: Address | null }) {
   const pinned = expected ? tx.to.toLowerCase() === expected.toLowerCase() : false
+  const selector = tx.data.slice(0, 10)
   return (
     <dl className="kv">
       <dt>to</dt>
@@ -219,7 +261,15 @@ function TxRequestView({ tx, expected }: { tx: TransactionRequest; expected: Add
         </span>
       </dd>
       <dt>selector</dt>
-      <dd>{tx.data.slice(0, 10)}</dd>
+      <dd>
+        {selector}
+        {/* The vault pins this too, so a payload can be aimed correctly and still be refused. */}
+        <span className="unit">
+          {POSITION_MANAGER_SELECTORS.includes(selector.toLowerCase())
+            ? 'modifyLiquidities, the only selector the vault forwards'
+            : 'not modifyLiquidities, so the vault would reject this'}
+        </span>
+      </dd>
       <dt>calldata</dt>
       <dd className="faint">{tx.data}</dd>
     </dl>
@@ -244,7 +294,6 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
   const [fillTx, setFillTx] = useState<TxState>(txIdle)
   const [claim, setClaim] = useState<Action<{ tx: TransactionRequest }>>(idle)
   const [receipt, setReceipt] = useState<Action<FillReceipt>>(idle)
-  const [taker, setTaker] = useState<{ balance: bigint; allowance: bigint } | null>(null)
 
   const mintTx = useTx()
   const approveTx = useTx()
@@ -252,6 +301,8 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
 
   const chainId = config?.deployment.chainId ?? config?.chain.chainId ?? CHAIN.id
   const poolInfoAt = useRef(0)
+  /** Every snapshot read takes a number, and only the newest one is allowed to write what it read. */
+  const refreshSeq = useRef(0)
 
   /**
    * Reads the chain, and on a press also asks the Uniswap API about the pool.
@@ -263,11 +314,17 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
   const refresh = useCallback(
     async (options: { pressed?: boolean } = {}) => {
       if (!config) return
+      const seq = ++refreshSeq.current
       if (options.pressed) setRefreshing(true)
       try {
         const next = await readSnapshot(config, [])
-        setSnapshot(next)
-        setSnapshotError(null)
+        // A poll that left before a fill was confirmed can answer after the refresh that fill asked for, and it
+        // would put pre-fill numbers back on the screen a second after the settled ones arrived. A read that has
+        // been overtaken is dropped instead.
+        if (seq === refreshSeq.current) {
+          setSnapshot(next)
+          setSnapshotError(null)
+        }
         // A press also puts a real authenticated request and its response in the panel at the bottom, with no
         // wallet and no gas. The poll never does: the key allows six requests a second and a demo should not
         // spend that on a timer.
@@ -285,7 +342,7 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
           }).catch(() => null)
         }
       } catch (error) {
-        setSnapshotError(reason(error))
+        if (seq === refreshSeq.current) setSnapshotError(reason(error))
       } finally {
         if (options.pressed) setRefreshing(false)
       }
@@ -314,13 +371,19 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
   const decimalsA = snapshot?.tokenA.decimals.ok ? snapshot.tokenA.decimals.value : 18
   const decimalsB = snapshot?.tokenB.decimals.ok ? snapshot.tokenB.decimals.value : 18
   const tokenIn = aToB ? token0 : token1
-  const tokenOut = aToB ? token1 : token0
   const inMeta = metaOf(tokenIn)
-  const outMeta = metaOf(tokenOut)
   const inSymbol = inMeta.symbol
-  const outSymbol = outMeta.symbol
   const inDecimals = inMeta.decimals
-  const outDecimals = outMeta.decimals
+  // The two sides of a result, labelled by the result itself. Everything above describes the dropdown as it
+  // stands now, which is the wrong thing to hang a settled transaction off: the dropdown moves after a fill and
+  // the receipt on screen does not, so a panel that borrowed those labels renamed a transaction already on
+  // chain. A quote carries `isAToB` and a fill carries the two token addresses, so both can say it themselves.
+  const legsOfDirection = (isAToB: boolean) => ({
+    in: metaOf(isAToB ? token0 : token1),
+    out: metaOf(isAToB ? token1 : token0),
+  })
+  const quoteLegs = quote.status === 'ok' ? legsOfDirection(quote.value.isAToB) : null
+  const fillLegs = fill.status === 'ok' ? { in: metaOf(fill.value.tokenIn), out: metaOf(fill.value.tokenOut) } : null
 
   const tokenId = snapshot?.uniswap.tokenId ?? null
   const vaultAddress = config?.deployment.vault ?? null
@@ -329,19 +392,42 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
   // Both only feed the receipt read-back, which filters the two ModifyLiquidity events by emitter and by pool.
   const poolManager = config?.chain.poolManager ?? config?.deployment.poolManager ?? null
   const poolId = snapshot?.uniswap.poolId ?? config?.deployment.pool?.poolId ?? null
-  const orderResult = config ? orderFrom(config.deployment) : null
+  // Memoised because it is a dependency of `fillInputs` and of four callbacks below. `orderFrom` returns a
+  // fresh object and re-parses a 78 digit traits value, so rebuilding it per render meant none of them could
+  // ever hit their cache, and the first effect to take `fillInputs` as a dependency would have looped.
+  const orderResult = useMemo(() => (config ? orderFrom(config.deployment) : null), [config])
+
+  /**
+   * The taker's balance and allowance, tagged with what they were read for.
+   *
+   * The key is the point. Direction is a dropdown, so `tokenIn` changes under this read, and a value kept
+   * without a key stayed on screen describing the previous token: Approve read as already done for a token the
+   * router had never been approved for. Comparing the key at render time means a flip invalidates the figures
+   * immediately, while a re-read of the same three inputs on the five second poll leaves them alone.
+   */
+  const [takerRead, setTakerRead] = useState<{ key: string; result: Result<TakerPosition> } | null>(null)
+  const takerKey = takerAddress && tokenIn && router ? [takerAddress, tokenIn, router].join(':').toLowerCase() : null
+  const takerResult = takerRead && takerRead.key === takerKey ? takerRead.result : null
+  const taker = takerResult?.ok ? takerResult.value : null
+  const takerReadFailure = takerResult && !takerResult.ok ? takerResult.reason : null
+  const takerSeq = useRef(0)
 
   const refreshTaker = useCallback(async () => {
-    if (!takerAddress || !tokenIn || !router) {
-      setTaker(null)
+    const seq = ++takerSeq.current
+    if (!takerAddress || !tokenIn || !router || !takerKey) {
+      setTakerRead(null)
       return
     }
     try {
-      setTaker(await readTakerPosition({ taker: takerAddress, token: tokenIn, router }))
-    } catch {
-      setTaker(null)
+      const read = await readTakerPosition({ taker: takerAddress, token: tokenIn, router })
+      // Two reads are in flight across a direction change, and the older one can answer last.
+      if (seq === takerSeq.current) setTakerRead({ key: takerKey, result: ok(read) })
+    } catch (error) {
+      // This was a bare catch, so a wallet whose balance could not be read looked exactly like a wallet with no
+      // balance, and the sidebar sent the visitor to press Mint over an RPC failure.
+      if (seq === takerSeq.current) setTakerRead({ key: takerKey, result: unavailable(reason(error)) })
     }
-  }, [router, takerAddress, tokenIn])
+  }, [router, takerAddress, takerKey, tokenIn])
 
   useEffect(() => {
     void refreshTaker()
@@ -463,6 +549,9 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
     // `swap()` pulls the input token through the router exactly as the real one does. Checking them here is
     // what keeps a press that cannot settle from spending a /lp/decrease and a /lp/increase on the way to
     // finding out. The wording is the sidebar's, so the chip and this note say the same thing.
+    if (takerReadFailure) {
+      return { ok: false, reason: `The wallet's balance and allowance could not be read: ${takerReadFailure}` }
+    }
     if (!taker) return { ok: false, reason: 'Balance and allowance have not been read for this wallet yet.' }
     if (!hasBalance) return { ok: false, reason: `Top up required, press Mint ${inSymbol} first.` }
     if (!hasAllowance) return { ok: false, reason: 'Approval required, press Approve the router first.' }
@@ -508,6 +597,7 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
     snapshot,
     taker,
     takerAddress,
+    takerReadFailure,
     token0,
     token1,
     tokenId,
@@ -597,12 +687,17 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
     }
   }, [chainId, executeTx, snapshot, tokenId, vaultAddress])
 
+  // Checked before the button is armed, because the alternative is a revert the owner has already signed for.
+  const claimRefusal = positionManagerRefusal(claim.status === 'ok' ? claim.value.tx : null, positionManager)
+  const claimTargetOff = Boolean(claimRefusal)
+
   const onExecuteClaim = useCallback(() => {
     if (claim.status !== 'ok' || !claim.value.tx || !vaultAddress || !takerAddress || !walletClient) return
     // Mint and approve both refuse on the wrong chain. Without the same guard here viem answers with its own
-    // chain mismatch string, which names two chain ids and no fix.
-    if (wrongChain) return
-    const data = claim.value.tx.data as Hex
+    // chain mismatch string, which names two chain ids and no fix. The refusal is the same idea one step
+    // earlier: the button that carries it is already disabled, and a signature is not worth risking on that.
+    if (wrongChain || claimRefusal) return
+    const tx = claim.value.tx
     void executeTx.send(
       () =>
         walletClient.writeContract({
@@ -611,11 +706,33 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
           address: vaultAddress,
           abi: vaultAbi,
           functionName: 'executeOnPositionManager',
-          args: [data, 0n],
+          // The value the API asked for, not a zero. `executeOnPositionManager` forwards it to the position
+          // manager, and a payload built with a native leg would have arrived there with nothing attached.
+          args: [tx.data as Hex, BigInt(tx.value ?? 0)],
         }),
       { onConfirmed: () => void refresh() },
     )
-  }, [claim, executeTx, refresh, takerAddress, vaultAddress, walletClient, wrongChain])
+  }, [claim, claimRefusal, executeTx, refresh, takerAddress, vaultAddress, walletClient, wrongChain])
+
+  /**
+   * Why the two wallet buttons are greyed out, when they are.
+   *
+   * They used to keep their ordinary titles while disabled, so the two states that stop most first time takers,
+   * a wallet on another network and a wallet not connected, hovered as "Mint demo TKA." and explained nothing.
+   * Each string is the fix, in the order the visitor has to apply them.
+   */
+  const mintDisabledReason = !takerAddress
+    ? 'Connect a wallet first.'
+    : wrongChain
+      ? 'Your wallet is on another network. Switch it to Ethereum Sepolia.'
+      : !walletClient
+        ? 'The wallet is connected but not ready to sign yet.'
+        : !tokenIn
+          ? 'The input token has not been read off the pool key yet.'
+          : null
+  const approveDisabledReason =
+    mintDisabledReason ??
+    (!router ? 'The deployment record carries no router address, so there is nothing to approve.' : null)
 
   const quoteDisabledReason = !config
     ? 'Addresses are still loading.'
@@ -820,6 +937,12 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
 
               <div className="wallet-readiness" aria-live="polite">
                 <span>{taker ? `${fmtAmount(taker.balance, inDecimals)} ${inSymbol}` : 'Balance not read'}</span>
+                {/* The whole sentence is under the card, on the note every other gate uses. */}
+                {takerReadFailure ? (
+                  <span className="needs-action" title={takerReadFailure}>
+                    the read failed
+                  </span>
+                ) : null}
                 {taker && parsedAmount !== null && parsedAmount > 0n ? (
                   <>
                     <span className={hasBalance ? 'ready' : 'needs-action'}>
@@ -836,8 +959,8 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
                 <button
                   className="btn"
                   onClick={onMint}
-                  disabled={mintTx.busy || !takerAddress || !tokenIn || !walletClient || wrongChain}
-                  title={takerAddress ? `Mint demo ${inSymbol}.` : 'Connect a wallet first.'}
+                  disabled={mintTx.busy || Boolean(mintDisabledReason)}
+                  title={mintDisabledReason ?? `Mint demo ${inSymbol}.`}
                 >
                   <span className="button-step">1</span>
                   {mintTx.state.status === 'signing'
@@ -849,8 +972,8 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
                 <button
                   className="btn"
                   onClick={onApprove}
-                  disabled={approveTx.busy || !takerAddress || !tokenIn || !router || !walletClient || wrongChain}
-                  title={takerAddress ? 'Approve the router for this token.' : 'Connect a wallet first.'}
+                  disabled={approveTx.busy || Boolean(approveDisabledReason)}
+                  title={approveDisabledReason ?? `Approve the router to pull your ${inSymbol}.`}
                 >
                   <span className="button-step">2</span>
                   {approveTx.state.status === 'signing'
@@ -900,12 +1023,12 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
 
         <section className="client-results" aria-label="Swap result" aria-live="polite">
           <ResultPanel title="Quote" state={quote}>
-            {quote.status === 'ok' ? (
+            {quote.status === 'ok' && quoteLegs ? (
               <div className="client-swap-summary">
                 <div className="client-swap-leg">
                   <span>You pay</span>
                   <strong>
-                    {exact(quote.value.amountIn, inDecimals)} {inSymbol}
+                    {exact(quote.value.amountIn, quoteLegs.in.decimals)} {quoteLegs.in.symbol}
                   </strong>
                 </div>
                 <span className="client-swap-arrow" aria-hidden="true">
@@ -914,7 +1037,7 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
                 <div className="client-swap-leg">
                   <span>You receive</span>
                   <strong>
-                    {exact(quote.value.amountOut, outDecimals)} {outSymbol}
+                    {exact(quote.value.amountOut, quoteLegs.out.decimals)} {quoteLegs.out.symbol}
                   </strong>
                 </div>
               </div>
@@ -929,13 +1052,13 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
             >
               {fill.status === 'pending' ? <div className="muted">Preparing your transaction…</div> : null}
               {fill.status === 'error' ? <div className="failure mono">{fill.message}</div> : null}
-              {fill.status === 'ok' ? (
+              {fill.status === 'ok' && fillLegs ? (
                 <>
                   <div className="client-swap-summary">
                     <div className="client-swap-leg">
                       <span>Paid</span>
                       <strong>
-                        {exact(fill.value.amountIn, inDecimals)} {inSymbol}
+                        {exact(fill.value.amountIn, fillLegs.in.decimals)} {fillLegs.in.symbol}
                       </strong>
                     </div>
                     <span className="client-swap-arrow" aria-hidden="true">
@@ -944,7 +1067,7 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
                     <div className="client-swap-leg">
                       <span>Received</span>
                       <strong>
-                        {exact(fill.value.amountOut, outDecimals)} {outSymbol}
+                        {exact(fill.value.amountOut, fillLegs.out.decimals)} {fillLegs.out.symbol}
                       </strong>
                     </div>
                   </div>
@@ -1030,11 +1153,11 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
                   <button
                     className="btn primary small"
                     onClick={onExecuteClaim}
-                    disabled={executeTx.busy || !walletClient || !isVaultOwner || wrongChain}
+                    disabled={executeTx.busy || !walletClient || !isVaultOwner || wrongChain || claimTargetOff}
                     title={
-                      isVaultOwner
-                        ? 'Sends vault.executeOnPositionManager with the calldata the API built.'
-                        : 'executeOnPositionManager is onlyOwner, so this needs the vault owner in the wallet.'
+                      !isVaultOwner
+                        ? 'executeOnPositionManager is onlyOwner, so this needs the vault owner in the wallet.'
+                        : (claimRefusal ?? 'Sends vault.executeOnPositionManager with the calldata the API built.')
                     }
                   >
                     Confirm fee claim
@@ -1046,6 +1169,9 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
                       The calldata is real and yours to inspect. Executing it needs the vault owner, because
                       executeOnPositionManager is onlyOwner.
                     </span>
+                  ) : claimRefusal ? (
+                    // Said out loud rather than left to a tooltip: the alternative is a signature that reverts.
+                    <span className="faint">{claimRefusal}</span>
                   ) : wrongChain ? (
                     <span className="faint">Switch your wallet to Ethereum Sepolia to execute this.</span>
                   ) : null}

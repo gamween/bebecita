@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import type { Hex, TransactionReceipt } from 'viem'
 
 import { publicClient } from './client'
@@ -76,10 +76,11 @@ export function useTx(): UseTx {
 
   const reset = useCallback(() => setState(txIdle), [])
 
-  return {
-    state,
-    send,
-    reset,
-    busy: state.status === 'signing' || state.status === 'pending',
-  }
+  // Memoised because callers hold this object in dependency arrays. A fresh object per render invalidated every
+  // `useCallback` that took one, on every render, which is a live trap for the first effect to depend on any of
+  // them. `send` and `reset` are already stable, so this only changes identity when the state does.
+  return useMemo(
+    () => ({ state, send, reset, busy: state.status === 'signing' || state.status === 'pending' }),
+    [reset, send, state],
+  )
 }
