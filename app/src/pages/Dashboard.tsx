@@ -651,8 +651,9 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
       setFill({ status: 'error', message: fillInputs.reason })
       return
     }
+    const dry = Boolean(fillInputs.value.dry)
     setFill({ status: 'pending' })
-    setFillTx(fillInputs.value.dry ? txIdle : { status: 'signing' })
+    setFillTx(dry ? txIdle : { status: 'signing' })
     setProgress({ steps: [], log: [] })
     let sent: Hex | null = null
     try {
@@ -693,7 +694,8 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
     } catch (error) {
       const message = describeError(error)
       setFill({ status: 'error', message })
-      setFillTx({ status: 'failed', hash: sent, message })
+      // A dry run signs nothing, so there is no transaction to report as failed. The card below says why.
+      if (!dry) setFillTx({ status: 'failed', hash: sent, message })
     }
   }, [fillInputs, refresh, refreshTaker, scanHistory])
 
