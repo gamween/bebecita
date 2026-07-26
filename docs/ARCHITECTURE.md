@@ -128,13 +128,17 @@ points. Beyond that it does not attempt to decode the payload, because the real 
 and any decoder we wrote would be a second implementation to get wrong. Instead it judges the payload by its
 effects, and it has the numbers to do so because `preTransferOut` receives `amountOut` as a parameter.
 
-Five guards:
+Five guards, each with the error it raises, because a revert that names its own guard is the difference between
+a diagnosis and an afternoon:
 
-1. after the unwind, the output balance must have grown by at least `amountOut`. A floor, not a sign check.
-2. the input side balance may not shrink, so a payload cannot drain the other half of the book.
-3. the position's liquidity may not fall by more than `maxUnwindPct`, so one fill cannot empty the collateral.
-4. a redeposit may only grow the position.
-5. the value the unwind released must land in the vault, within `haircutBps`.
+1. `UnwindShortfall`. After the unwind, the output balance must have grown by at least `amountOut`. A floor,
+   not a sign check.
+2. `CollateralLeak`. The input side balance may not shrink, so a payload cannot drain the other half of the
+   book.
+3. `UnwindExceedsCap`. The position's liquidity may not fall by more than `maxUnwindPct`, so one fill cannot
+   empty the collateral.
+4. `RedepositReducedPosition`. A redeposit may only grow the position.
+5. `UnwindValueDiverted`. The value the unwind released must land in the vault, within `haircutBps`.
 
 The fifth exists because the first four are not enough, and saying why is more useful than listing it.
 
@@ -150,9 +154,21 @@ That needs three things the vault previously had no way to obtain: the live pool
 bounds, and the conversion from liquidity to amounts. The first two are read on chain, from
 `StateView.getSlot0` and `PositionManager.getPoolAndPositionInfo`, both hardened the way `_positionLiquidity`
 and `Fee.sol:148-160` are, with pinned return lengths and no fail open path inside a hook. The third is
-`contracts/src/libraries/LiquidityAmounts.sol`, the standard v4 conversion with its three cases, vendored
-because neither v4-core nor v4-periphery is reachable through this dependency tree, and checked against
-published constants and against a factor `yarn rebalance` measured on Sepolia.
+`contracts/src/libraries/LiquidityAmounts.sol`.
+
+That file is vendored, which is a thing worth defending rather than doing quietly. It carries two libraries,
+`TickMath` and `LiquidityAmounts`, and both are the Uniswap core routines reproduced unmodified in behaviour:
+tick to sqrt price, and liquidity to per token amounts with its three cases for a price below, inside or above
+the range. Neither is reachable through this repository's dependency tree. The only Uniswap package
+`node_modules` carries is `@uniswap/permit2-sdk`, which is TypeScript, and `remappings.txt` names five remaps,
+none of them a v4 one. Pulling in v4-core or v4-periphery for two pure functions would add a Solidity
+dependency graph an order of magnitude larger than this project, on a build that already pays four minutes to
+`via_ir`, and it would pin this project to a v4 release train it has no other reason to track.
+
+Vendoring a routine is only acceptable if the copy is checked, so it is. `contracts/test/LiquidityAmounts.t.sol`
+is sixteen tests against published constants and against the boundary cases, and the conversion factor it
+produces was cross checked against the one `yarn rebalance` measured on Sepolia from real balances. The choice
+is recorded in `docs/DECISIONS.md`, including what would make it wrong.
 
 The tolerance is `haircutBps` rather than a knob of its own. The haircut already says how much slack the maker
 accepts between what the position is worth and what it will count on, and one number that means one thing
@@ -161,7 +177,65 @@ survives a demo better than two that drift apart.
 A taker therefore chooses how to unwind and never whether the maker ends up short, nor where the released
 collateral lands.
 
-## Inventory
+## Two reachable figures, and why they are deliberately not one
+
+The vault exposes the same quantity twice, and the duplication is the design rather than an oversight.
+
+`reachableFromPosition()` is a mirror of the instruction. It computes `liquidity * unitsPerLiquidityE18`,
+capped and haircut, which is exactly the arithmetic `0x92` performs inside the VM. It is a single scalar, it
+reads no pool price, and it is `view` and cheap for the same reason the instruction has to be. Its purpose is
+that the dashboard, the tests and the quote all read the same number the VM will clamp to. If it ever disagreed
+with the instruction, the instruction would be the thing that was wrong.
+
+`reachableAmounts(PoolKey)` is the on-chain truth. It prices the position's real liquidity into both tokens at
+the live pool price through `StateView.getSlot0` and the position's own tick bounds, then applies the same cap
+and haircut. It returns two numbers, not one, because a unit of full range liquidity is worth `sqrt(price)` of
+token1 and `1/sqrt(price)` of token0 and those are only equal at parity.
+
+Keeping both is what makes the drift visible instead of silent. `unitsPerLiquidityE18` is a maker parameter
+compiled into the order at ship time, so it is exact when the book is shipped and decays as the pool moves.
+`reachableAmounts` does not decay, because it reads the price. The gap between them is the maker's staleness,
+measurable at any block with two `cast call`s, and the fix when it opens is to re-ship with the measured factor
+and `setRiskParams` to match.
+
+Read at block 11351549, after the last re-ship, the two agreed to twelve significant figures:
+`reachableFromPosition()` returned `21237223594691144907326` and the token1 side of `reachableAmounts` returned
+`21237223594691145042531`, a difference of 1.4e-13 bALPHA. That is what a freshly shipped book looks like. The
+run before the last rebalance is what a stale one looks like, and it is recorded in the Inventory section
+below.
+
+Collapsing the two into one accessor was considered. Using only `reachableAmounts` would put a pool price read
+inside `0x92`, which is on the critical path of every quote and every fill, for a number the guards already
+verify after the fact. Using only `reachableFromPosition` is what the vault did before the conservation guard,
+and it is precisely why guard five could not be written: a scalar in the instruction's own units cannot be
+compared against two token balances.
+
+## Deployment
+
+The app is deployed and public at https://bebecita-fh121iw64-gamween-7559s-projects.vercel.app.
+
+It matters that the deployed thing is the whole app rather than a static build with dead buttons. Two of this
+project's demonstrations run through a proxy: the Uniswap LP calls, which need an `x-api-key` that must not
+reach a bundle, and the JSON-RPC reads, which want an endpoint that is not a public one. In development both
+are Vite middleware. A plain static deploy of `app/dist` would have shipped a page whose API panel returns 401
+and whose chain reads fall back to whatever public endpoint answers, which is worse than no deployment because
+it looks like the project rather than being it.
+
+So both halves exist twice, and `api/` holds the serverless copies:
+
+| Route | Function | What it does |
+|---|---|---|
+| `/api/uniswap/lp/*` | `api/uniswap.ts` | attaches `UNISWAP_API_KEY` and forwards to `https://liquidity.api.uniswap.org`, echoing the real upstream URL back as `x-bebecita-upstream` and whether a key was attached as `x-bebecita-api-key` |
+| `/api/rpc` | `api/rpc.ts` | forwards JSON-RPC to `SEPOLIA_RPC_URL`, so a private endpoint stays out of the bundle |
+
+The two response headers are not decoration. The dashboard's network panel displays them, which is what makes
+the panel proof of where a request went rather than a claim about it. A judge can run the same check from a
+terminal, and `docs/SUBMISSION.md` carries the two `curl` commands.
+
+One deployment detail worth recording because it cost time. `vercel.json` routes `/api/uniswap/:path*` to
+`/api/uniswap?path=:path*` with an explicit rewrite rather than relying on a catch-all filename, and its
+`installCommand` installs both yarn projects, because the root install alone leaves `app/node_modules` empty
+and the build fails on the first import.
 
 A fill moves both tokens and it does not move them symmetrically.
 
@@ -172,12 +246,18 @@ was paid in, and a position smaller by whatever the unwind removed. The redeposi
 and a two sided deposit is capped by whichever token is scarce, which is the one the maker keeps selling. It
 can put back a fraction of what came out and no more.
 
-The numbers, all read off receipts by `yarn inventory` rather than modelled. Fifteen fills in one direction
-removed 14,694 units of liquidity from the position and put 5,857 back, which is 39.85%, and the shape behind
-that average is the part worth reading. The first five fills restored 96 to 98%, because the book was quoting
+The numbers, all read off receipts by `yarn inventory` rather than modelled, and re-derived from the router's
+own `Swapped` logs for this document. Fifteen fills in one direction removed 14,693.99 units of liquidity from
+the position and put 5,856.54 back, which is 39.86%, and the shape behind that average is the part worth
+reading. Cumulatively the first five fills restored between 95.7% and 97.2%, because the book was quoting
 almost nothing out and the unwind's own output came straight back into the position. Once the book quoted near
-parity, the restore rate fell to between 5% and 15% and stayed there. Over the same fifteen fills the vault
-accumulated 23,947 bBRAVO of free float and the position fell from 100,000 of liquidity to 92,140.
+parity, the per fill restore rate fell to between 4.6% and 17.8% and stayed in that band. Over the same fifteen
+fills the vault accumulated 23,947.10 bBRAVO of free float.
+
+The position figure needs one more word of precision, because the rebalance interleaves with the fills. After
+fourteen fills the position stood at 92,140.39 of liquidity against the 100,000 it opened with, and the vault
+held 21,859.61 bBRAVO. That is the state the rebalance below was run against, and `deployments/sepolia.json`
+records exactly those numbers under `rebalance.before`, which is why they are the ones to quote.
 
 That is not a defect being reported. It is the definition of a market maker seeing one sided flow: it is buying
 what the market is selling, and inventory is what buying looks like while nobody is buying back. Every market
@@ -218,14 +298,19 @@ above the pool sits at tick -2126, 0.8085 bALPHA per bBRAVO.
 That has one consequence the maker has to be told about, and `yarn rebalance` prints it. A unit of full range
 liquidity is worth `sqrt(price)` of token1 and `1/sqrt(price)` of token0, so `unitsPerLiquidityE18`, the maker's
 conversion factor compiled into the `0x92` arguments, is exactly 1 only while the pool sits at parity. After
-the rebalance it measures 0.899173157285162373 bALPHA per unit, so the instruction clamps `balanceOut` against
-11.21% more bALPHA than the position can release, and `reachableFromPosition()` reports the same overstatement
-because it reads the same number. The clamp and the URC-3 report stay consistent with each other and both drift
-from the position together. The measured effect on a fill is smaller than the drift, because `yarn fill` sizes
-the unwind as `amountOut / liquidity` and both terms carry the same factor: the safety margin between what a
-1% unwind releases and what the fill owes fell from 16.6% to 4.8%, and the fill still sizes and settles. The
-fix, when a maker wants that margin back, is to re-ship the book with the measured factor and to set the same
-number on the vault with `setRiskParams`, which is one command each and neither is on the fill path.
+the rebalance it measured 0.899173157285162373 bALPHA per unit. Until the book was re-shipped with that figure,
+the instruction was clamping `balanceOut` against 11.21% more bALPHA than the position could release, and
+`reachableFromPosition()` reported the same overstatement because it reads the same number. The measured effect
+on a fill was smaller than the drift, because `yarn fill` sizes the unwind as `amountOut / liquidity` and both
+terms carry the same factor: the safety margin between what a 1% unwind releases and what the fill owes fell
+from 16.6% to 4.8%, and the fill still sized and settled throughout.
+
+The fix is one command on each side and neither is on the fill path: re-ship the book with the measured factor,
+and `setRiskParams` the same number on the vault. Both have been applied. The live strategy carries
+`unitsPerLiquidityE18` of `899173157285162368` and `cast call <vault> "unitsPerLiquidityE18()(uint256)"` returns
+the same, which is why `reachableFromPosition()` and `reachableAmounts()` now agree to twelve significant
+figures. The drift will reopen the next time the pool moves, and the point is that it is measurable rather than
+that it is zero.
 
 ## Where the fill runs
 
@@ -236,7 +321,8 @@ came back and round the percentage up, `POST /lp/decrease` and `POST /lp/increas
 It touches the chain and the API through two injected interfaces and therefore does not know where it is
 running. `yarn fill` gives it a viem HTTP transport and a private key, the dashboard gives it the same
 transport and the wallet client wagmi built over the connected connector, and neither owns a second copy of
-the arithmetic. The dev server proxies the Uniswap key and JSON-RPC and runs none of this project's logic.
+the arithmetic. The two proxies carry the Uniswap key and JSON-RPC and run none of this project's logic, as
+Vite middleware locally and as the two serverless functions in `api/` in production. See Deployment above.
 
 What used to force a process was one detail. `TakerTraitsLib.build` is `internal pure` Solidity, so it can
 only run inside a contract, and `forge` is not available in a browser. `solver/src/takerTraits.ts` ports it:
