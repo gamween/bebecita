@@ -14,9 +14,19 @@ import { addSepoliaParameter, offeredConnectors, walletConnectProjectId } from '
  * and the reconnect on load is wagmi's own, driven by the connector it remembered in storage.
  */
 
-function useOutsideClose(onClose: () => void) {
+/**
+ * Dismisses whatever is open on a press outside the wallet, or on Escape.
+ *
+ * The ref goes on the `.wallet` wrapper rather than on the popover, because the trigger is the popover's
+ * sibling: with the ref on the popover the trigger counted as outside, so the mousedown closed the popover and
+ * the click that followed reopened it, which read as a popover that refuses to close. The listeners are only
+ * attached while something is open, so that a press anywhere on the page cannot quietly reset a connect error
+ * the closed state is still reporting.
+ */
+function useOutsideClose(active: boolean, onClose: () => void) {
   const ref = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
+    if (!active) return
     const onPointer = (event: MouseEvent) => {
       if (ref.current && !ref.current.contains(event.target as Node)) onClose()
     }
@@ -29,7 +39,7 @@ function useOutsideClose(onClose: () => void) {
       document.removeEventListener('mousedown', onPointer)
       document.removeEventListener('keydown', onKey)
     }
-  }, [onClose])
+  }, [active, onClose])
   return ref
 }
 
@@ -58,19 +68,16 @@ function ConnectorIcon({ connector }: { connector: Connector }) {
 function Chooser({
   connectors,
   onPick,
-  onClose,
   pending,
   error,
 }: {
   connectors: Connector[]
   onPick: (connector: Connector) => void
-  onClose: () => void
   pending: string | null
   error: string | null
 }) {
-  const ref = useOutsideClose(onClose)
   return (
-    <div className="popover" ref={ref}>
+    <div className="popover">
       <div className="popover-head">connect a wallet</div>
       <div className="popover-list">
         {connectors.map((connector) => (
@@ -100,17 +107,14 @@ function Account({
   address,
   connectorName,
   onDisconnect,
-  onClose,
 }: {
   address: string
   connectorName: string
   onDisconnect: () => void
-  onClose: () => void
 }) {
-  const ref = useOutsideClose(onClose)
   const [copied, copy] = useCopy()
   return (
-    <div className="popover" ref={ref}>
+    <div className="popover">
       <div className="popover-head">
         connected through {connectorName}
         <span className="faint">Ethereum Sepolia, chainId {CHAIN.id}</span>
@@ -146,13 +150,22 @@ export function WalletButton() {
     setPendingConnector(null)
     resetConnect()
   }, [resetConnect])
+  const walletRef = useOutsideClose(open !== null, close)
 
   useEffect(() => {
     if (status === 'connected') {
       setPendingConnector(null)
+      // A connect that failed and then succeeded some other way, in the extension or through the reconnect,
+      // leaves the rejection on the mutation, and it would resurface under the connect button after a disconnect.
+      resetConnect()
       setOpen((current) => (current === 'chooser' ? null : current))
+      return
     }
-  }, [status])
+    // Losing the account is the extension's prerogative: a disconnect or a lock done there leaves the account
+    // popover describing a session that no longer exists, and it would reappear on the next connect. The chooser
+    // is left alone because a rejected connect passes through here and its error is worth keeping on screen.
+    setOpen((current) => (current === 'account' ? null : current))
+  }, [resetConnect, status])
 
   const pick = useCallback(
     (chosen: Connector) => {
@@ -198,15 +211,20 @@ export function WalletButton() {
       )
     }
     return (
-      <div className="wallet">
-        <button className="btn small" onClick={onConnectClick} disabled={connecting && offered.length === 1}>
+      <div className="wallet" ref={walletRef}>
+        <button
+          className="btn small"
+          onClick={onConnectClick}
+          disabled={connecting && offered.length === 1}
+          // A single wallet is connected straight away, so there is no expandable menu to report in that case.
+          aria-expanded={offered.length > 1 ? open === 'chooser' : undefined}
+        >
           {connecting ? 'connecting' : 'connect wallet'}
         </button>
         {open === 'chooser' ? (
           <Chooser
             connectors={offered}
             onPick={pick}
-            onClose={close}
             pending={pendingConnector}
             error={connectError ? describeError(connectError) : null}
           />
@@ -231,6 +249,11 @@ export function WalletButton() {
         >
           {switching ? 'switching' : `on chain ${chainId}, switch to Sepolia`}
         </button>
+        {/* A wallet that cannot or will not add Sepolia would otherwise leave this bar with one dead button and
+            no route back to the chooser. */}
+        <button className="btn small ghost" onClick={() => disconnect()} title="disconnect and pick another wallet">
+          disconnect
+        </button>
         {switchError ? (
           <div className="popover popover-quiet">
             <div className="popover-error">{describeError(switchError)}</div>
@@ -241,11 +264,12 @@ export function WalletButton() {
   }
 
   return (
-    <div className="wallet">
+    <div className="wallet" ref={walletRef}>
       <button
         className="chip chip-button"
-        onClick={() => setOpen(open === 'account' ? null : 'account')}
+        onClick={() => (open === 'account' ? close() : setOpen('account'))}
         title={address}
+        aria-expanded={open === 'account'}
       >
         <span className="led" />
         <span className="mono">{shortAddress(address)}</span>
@@ -259,7 +283,6 @@ export function WalletButton() {
             disconnect()
             close()
           }}
-          onClose={close}
         />
       ) : null}
     </div>
