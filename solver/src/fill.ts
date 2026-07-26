@@ -216,6 +216,7 @@ async function main() {
     amount,
     unitsPerLiquidityE18: strategy.params.unitsPerLiquidityE18,
     maxUnwindPct: strategy.params.maxUnwindPct,
+    haircutBps: strategy.params.haircutBps,
     onStep: ({ index, label }) => step(index, label),
   })
 

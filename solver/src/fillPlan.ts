@@ -116,6 +116,12 @@ export interface PlanFillParams extends FillProgress {
   unitsPerLiquidityE18: bigint
   /** Largest share of the position the maker authorised one fill to unwind. */
   maxUnwindPct: number
+  /**
+   * The maker's haircut on the deployed leg, in basis points. Read from the same place as `maxUnwindPct` by
+   * every caller, because the two together are what instruction `0x92` clamps with, and the safety margin
+   * below is derived from this rather than guessed.
+   */
+  haircutBps: number
 }
 
 export interface FillPlan {
@@ -152,17 +158,35 @@ export interface FillPlan {
 }
 
 /**
- * Margin added on top of the exact percentage before rounding up.
+ * Margin added on top of the exact percentage before rounding up, derived rather than chosen.
  *
- * The instruction values a unit of position liquidity with the maker's conservative conversion factor and does
- * not reproduce v4 tick math, so the amount a withdrawal actually releases can differ slightly from the linear
- * estimate. The vault's first guard is a floor on the realised delta, `outAfter >= outBefore + amountOut`, and
- * it is checked after the payload has run, so being one percent short there costs a reverted fill. Five
- * percent here is the same margin as the maker's haircut and it cannot push the request past the cap: the
- * instruction has already clamped `amountOut` to 23.75% of the position, and 23.75 x 1.05 rounds to 25, which
- * is exactly `maxUnwindPct`.
+ * Why any margin at all: the instruction values a unit of position liquidity with the maker's conservative
+ * conversion factor and does not reproduce v4 tick math, so the amount a withdrawal actually releases can
+ * differ slightly from the linear estimate. The vault's first guard is a floor on the realised delta,
+ * `outAfter >= outBefore + amountOut`, checked after the payload has run, so being a fraction of a percent
+ * short there costs a reverted fill.
+ *
+ * Why exactly this much, and not a constant. The haircut is the only headroom that exists. Instruction `0x92`
+ * has already clamped `amountOut` to `maxUnwindPct * (1 - haircutBps / 10000)` of the position, the request is
+ * `ceil(exactPct * (1 + margin))`, and `maxUnwindPct` is an integer, so `ceil` stays inside the cap exactly
+ * while `exactPct * (1 + margin) <= maxUnwindPct`. Substituting the clamp gives `margin <= h / (1 - h)`, which
+ * is what this returns: the largest margin that cannot breach the cap, whatever the haircut is.
+ *
+ * The previous constant 0.05 satisfied that only by coincidence, at the single haircut this demo ships with:
+ * 500 bps gives a bound of 0.0526, so `setRiskParams` with a smaller haircut turned a max size fill into the
+ * throw below, whose message blames a disagreement between the order and the vault that never happened.
+ * With the margin derived, that message is only ever printed when the two genuinely disagree.
+ *
+ * A zero haircut derives a zero margin, which is correct and not a degenerate case: with no haircut the clamp
+ * sits on the cap and there is no room for a margin at all, so the honest answer is to ask for the exact
+ * percentage and let the floor check speak if tick math disagrees.
  */
-export const UNWIND_SAFETY = 0.05
+export function unwindSafety(haircutBps: number): number {
+  if (!Number.isFinite(haircutBps) || haircutBps < 0 || haircutBps >= 10_000) {
+    throw new Error(`haircutBps is ${haircutBps}, and the instruction only builds for a haircut in [0, 10000)`)
+  }
+  return haircutBps / (10_000 - haircutBps)
+}
 
 /**
  * Share of the free float the redeposit puts back to work.
@@ -237,16 +261,19 @@ export async function planFill(
   // The vault's first guard is a delta check, `outAfter >= outBefore + amountOut`, so the float already in the
   // vault does not count towards it. The withdrawal alone has to release the whole payout.
   const exactPct = (Number((quoted.amountOut * 10n ** 12n) / deployed) / 1e12) * 100
-  const unwindPercent = Math.max(1, Math.min(100, Math.ceil(exactPct * (1 + UNWIND_SAFETY))))
+  const safety = unwindSafety(params.haircutBps)
+  const unwindPercent = Math.max(1, Math.min(100, Math.ceil(exactPct * (1 + safety))))
 
   info('exact unwind', `${exactPct.toFixed(6)}% of the position`)
+  info('safety margin', `${(safety * 100).toFixed(4)}%, derived from the ${params.haircutBps} bps haircut`)
   info('requested', `${unwindPercent}%, rounded up because liquidityPercentageToDecrease is an integer`)
 
   if (unwindPercent > params.maxUnwindPct) {
     throw new Error(
-      `sizing wants ${unwindPercent}% of the position and the maker authorised ${params.maxUnwindPct}%. ` +
-        'Instruction 0x92 should have clamped the quote below that, so this means the order and the vault ' +
-        'disagree on the risk parameters.',
+      `sizing wants ${unwindPercent}% of the position and the maker authorised ${params.maxUnwindPct}%. The ` +
+        `margin above is derived from the ${params.haircutBps} bps haircut precisely so it cannot do that, so ` +
+        'the haircut and the cap used here are not the ones instruction 0x92 clamped the quote with: the order ' +
+        'and the vault disagree on the risk parameters. Re-ship with yarn demo:reset.',
     )
   }
 

@@ -38,6 +38,8 @@ export interface FillRequest {
   token1: Address
   unitsPerLiquidityE18: bigint
   maxUnwindPct: number
+  /** Read off the vault, like `maxUnwindPct`. The plan derives its unwind safety margin from it. */
+  haircutBps: number
   chainId: number
   /** Simulate against live state and broadcast nothing. */
   dry?: boolean
@@ -269,6 +271,7 @@ export async function runFill(request: FillRequest): Promise<FillResult> {
       amount: request.amount,
       unitsPerLiquidityE18: request.unitsPerLiquidityE18,
       maxUnwindPct: request.maxUnwindPct,
+      haircutBps: request.haircutBps,
       onStep: ({ index, label }) => emit({ type: 'step', index, label }),
       onInfo: (label, value) => emit({ type: 'log', line: `${label}  ${value}` }),
     },
