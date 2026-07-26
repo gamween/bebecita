@@ -33,6 +33,7 @@ import { sepolia } from 'viem/chains'
 
 import { SEPOLIA, env } from './config.js'
 import { planFill, type ChainReader, type LiquidityApi } from './fillPlan.js'
+import { REVERT_ERRORS } from './revertAbi.js'
 import {
   FILL_REQUEST_PATH,
   FILL_REQUEST_RELATIVE,
@@ -52,11 +53,19 @@ const erc20Abi = parseAbi([
   'function symbol() view returns (string)',
 ])
 
+/**
+ * The router, plus every custom error a fill can revert with.
+ *
+ * viem decodes a custom error only when its definition is in the ABI it was handed, so without
+ * `REVERT_ERRORS` a reverted simulation prints a bare selector and the name of the guard that fired is lost.
+ * The browser parses the same list into its own router ABI.
+ */
 const routerAbi = parseAbi([
   'struct Order { address maker; uint256 traits; bytes data; }',
   'function quote(Order order, uint256 amount, bytes takerTraitsAndData) view returns (uint256 amountIn, uint256 amountOut, bytes32 orderHash)',
   'function swap(Order order, uint256 amount, bytes takerTraitsAndData) payable returns (uint256 amountIn, uint256 amountOut, bytes32 orderHash)',
   'event Swapped(bytes32 orderHash, address maker, address taker, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut)',
+  ...REVERT_ERRORS,
 ])
 
 const vaultAbi = parseAbi([

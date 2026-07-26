@@ -1,8 +1,15 @@
 import { parseAbi } from 'viem'
 
+import { REVERT_ERRORS } from '@solver/revertAbi'
+
 /**
  * Minimal ABIs, written against the deployed sources rather than generated, so the app carries no build
  * dependency on `forge build` output (which is gitignored).
+ *
+ * The two ABIs a fill is executed through carry `REVERT_ERRORS` as well as their function fragments. viem can
+ * only decode a custom error whose definition is in the ABI it was given, so without them every guard in this
+ * project reached the screen as a bare selector. The list lives in `solver/src/revertAbi.ts` because
+ * `solver/src/fill.ts` needs the same one and there is no second copy.
  */
 
 export const vaultAbi = parseAbi([
@@ -19,6 +26,7 @@ export const vaultAbi = parseAbi([
   'function getEffectiveLiquidity((address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks) key) view returns (uint256 token0, uint256 token1)',
   'function hook() view returns (address)',
   'function executeOnPositionManager(bytes payload, uint256 value) payable returns (bytes)',
+  ...REVERT_ERRORS,
 ])
 
 /**
@@ -31,6 +39,7 @@ export const routerAbi = parseAbi([
   'function hash((address maker, uint256 traits, bytes data) order) view returns (bytes32)',
   'function quote((address maker, uint256 traits, bytes data) order, uint256 amount, bytes takerTraitsAndData) view returns (uint256 amountIn, uint256 amountOut, bytes32 orderHash)',
   'function swap((address maker, uint256 traits, bytes data) order, uint256 amount, bytes takerTraitsAndData) payable returns (uint256 amountIn, uint256 amountOut, bytes32 orderHash)',
+  ...REVERT_ERRORS,
 ])
 
 export const aquaAbi = parseAbi([
