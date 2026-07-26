@@ -25,7 +25,7 @@ import { CHAIN, POLL_MS, readTransport, rpcEndpoints } from './client'
 export const walletConnectProjectId = String(import.meta.env.VITE_WALLETCONNECT_PROJECT_ID ?? '').trim()
 
 const metadata = {
-  name: 'Bebecita',
+  name: 'Aqua × Uniswap v4',
   description: 'An Aqua order book whose maker inventory lives in a Uniswap v4 position',
   url: typeof window === 'undefined' ? 'http://localhost:5173' : window.location.origin,
   icons: [],
