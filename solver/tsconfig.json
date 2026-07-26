@@ -1,0 +1,32 @@
+{
+  // Eleven of the thirteen modules under `solver/src` were never typechecked by anything. The app's program
+  // pulls in only what it imports through the `@solver` alias, which is `fillPlan.ts`, `takerTraits.ts` and
+  // what those reach, and `tsx` strips types without checking them, so `yarn fill` and `yarn rebalance` ran
+  // on code no compiler had ever read. This program covers all of it. `yarn typecheck` at the root runs it.
+  //
+  // The repository runs two TypeScript majors, 5.9 at the root and 7.0 in `app`, because the app's toolchain
+  // pulled 7 in and the root has its own lockfile. This program is clean under both, checked by running it
+  // with each compiler, so converging them is a dependency bump rather than a code change and is deliberately
+  // not part of this branch.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    // The solver is Node ESM and its relative imports carry the `.js` extension the runtime wants, which is
+    // what NodeNext resolution expects. The app compiles the shared modules under `bundler` resolution
+    // instead, and both accept that extension, which is why the same files satisfy two programs.
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "moduleDetection": "force",
+    "types": ["node"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "noEmit": true
+  },
+  "include": ["src"]
+}
