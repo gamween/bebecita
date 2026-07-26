@@ -301,6 +301,8 @@ main:focus {
 .wallet {
   position: relative;
   display: inline-flex;
+  /* The wrong network state carries a switch and an escape hatch side by side. The popover is out of flow. */
+  gap: 6px;
 }
 
 .popover {
@@ -2317,14 +2319,6 @@ pre.json {
     margin-left: auto;
   }
 
-  .status > .chip {
-    display: none;
-  }
-
-  .topbar-landing .status > .chip {
-    display: none;
-  }
-
   .hero {
     padding: 68px 0 58px;
   }
@@ -2970,6 +2964,10 @@ th {
 }
 
 @media (max-width: 900px) {
+  /* The network chip is what folds away when the bar runs out of room, and it is always the first child. The
+     selector has to stay that narrow: WalletButton's own bare chip states, restoring and no wallet available,
+     are direct children of .status too, and hiding those emptied the wallet slot on a narrow window while the
+     session was being restored. */
   .topbar:not(.topbar-landing) .status > .chip:first-child {
     display: none;
   }
