@@ -3068,3 +3068,86 @@ th {
     text-align: left;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Settlement sequence
+   ---------------------------------------------------------------------------
+   The marquee above gestures at the shape of a fill. This states it, because two
+   of these steps carry file and line citations into the sponsor's own router and
+   a claim like that is only worth anything if it can be read and checked. It
+   borrows the panel, line and mono tokens rather than introducing its own, so it
+   sits inside the existing art direction instead of beside it.
+--------------------------------------------------------------------------- */
+
+.settlement {
+  list-style: none;
+  margin: 56px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 1px;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  background: var(--line);
+  border: 1px solid var(--line);
+}
+
+.settlement-step {
+  background: var(--panel);
+  padding: 20px var(--gutter) 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Step three is where the tokens actually leave the maker, one statement after step two. */
+.settlement-step.is-linked {
+  background: var(--bg-raised);
+}
+
+.settlement-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.settlement-index {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+
+.settlement-where {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+  word-break: break-all;
+}
+
+.settlement-step h3 {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+.settlement-step p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-dim);
+}
+
+.settlement-note {
+  margin: 18px 0 0;
+  max-width: 62ch;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink-dim);
+}
+
+@media (max-width: 720px) {
+  .settlement {
+    grid-template-columns: 1fr;
+  }
+}
