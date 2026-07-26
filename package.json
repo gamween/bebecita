@@ -28,6 +28,7 @@
     "rebalance": "tsx solver/src/rebalance.ts",
     "inventory": "tsx solver/src/inventory.ts",
     "fixtures": "tsx solver/src/fixtures.ts",
-    "demo:reset": "tsx solver/src/reset.ts"
+    "demo:reset": "tsx solver/src/reset.ts",
+    "negative-moment": "tsx solver/src/negativeMoment.ts"
   }
 }
