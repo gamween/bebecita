@@ -1,3 +1,4 @@
+import { LP_SIMULATE_TRANSACTION, LP_SLIPPAGE_TOLERANCE_PCT } from '@solver/lpParams'
 import { netlog } from './netlog'
 
 /**
@@ -5,9 +6,15 @@ import { netlog } from './netlog'
  *
  * Same host trap as `solver/src/uniswap.ts`: the `/lp/*` operations share an OpenAPI document with
  * `trade-api.gateway.uniswap.org/v1` but are served from `https://liquidity.api.uniswap.org` with no version
- * prefix. Requests leave through the Vite proxy at `/api/uniswap`, which attaches `x-api-key` from the
- * repository `.env`, so the key is never part of the bundle. The proxy also echoes the upstream URL back in
- * `x-bebecita-upstream`, which is what lets the network panel show where the request actually went.
+ * prefix. Requests leave through the proxy at `/api/uniswap`, which attaches `x-api-key` server side, so the
+ * key is never part of the bundle. The proxy also echoes the upstream URL back in `x-bebecita-upstream`, which
+ * is what lets the network panel show where the request actually went.
+ *
+ * This file is the transport, and only the transport. Everything that shapes a request body is in
+ * `solver/src/lpParams.ts`, shared with the terminal client, so the payload this tab previews is the payload
+ * `yarn fill` would place in the taker traits. The request bodies below are otherwise field for field what
+ * `solver/src/uniswap.ts` sends, and the OpenAPI document at
+ * `https://trade-api.gateway.uniswap.org/v1/api.json` is the arbiter of which fields exist at all.
  */
 
 export const LP_HOST = 'https://liquidity.api.uniswap.org'
@@ -52,7 +59,11 @@ async function post<T>(label: string, path: string, body: unknown): Promise<ApiC
       body: JSON.stringify(body),
     })
   } catch (error) {
-    const message = `${(error as Error).message}. The Uniswap calls go through the dev server proxy, which is what holds the API key, so they need \`yarn dev\` or \`yarn preview\` rather than a plain static server.`
+    // The request never left, so the diagnosis is about who was supposed to answer `/api/uniswap`. A browser
+    // cannot hold the API key, so something server side always attaches it: the dev server proxy locally, and
+    // the deployment's own function in production. A plain static file server is neither, and it answers this
+    // path with HTML or a 404 rather than with a payload.
+    const message = `${(error as Error).message}. The Uniswap calls go through /api/uniswap, which is what attaches the API key, so they need \`yarn dev\` or \`yarn preview\` locally, or a deployment that serves that path. A plain static file server cannot answer it.`
     netlog.finish(id, { error: message })
     throw new Error(message)
   }
@@ -139,11 +150,13 @@ export function decrease(params: {
     token0Address: params.token0,
     token1Address: params.token1,
     liquidityPercentageToDecrease: percent,
-    // The same tolerance the command line fill uses, so the payload this button previews is the payload a
-    // fill would actually place in the taker traits.
-    slippageTolerance: params.slippageTolerance ?? 0.5,
-    simulateTransaction: false,
-    withdrawAsWeth: false,
+    // The same tolerance the command line fill uses, from the same constant, so the payload this button
+    // previews is the payload a fill would actually place in the taker traits.
+    slippageTolerance: params.slippageTolerance ?? LP_SLIPPAGE_TOLERANCE_PCT,
+    simulateTransaction: LP_SIMULATE_TRANSACTION,
+    // `withdrawAsWeth` is in the schema and used to be sent as false here and omitted by the terminal client.
+    // It only decides whether a native leg comes back wrapped, and the demo pair is two plain ERC20s, so the
+    // field could never do anything. Omitted on both sides rather than sent on one.
   })
 }
 
@@ -173,8 +186,8 @@ export function increase(params: {
     token0Address: params.token0,
     token1Address: params.token1,
     independentToken: { tokenAddress: params.independentToken, amount: params.independentAmount },
-    slippageTolerance: 5,
-    simulateTransaction: false,
+    slippageTolerance: LP_SLIPPAGE_TOLERANCE_PCT,
+    simulateTransaction: LP_SIMULATE_TRANSACTION,
   })
 }
 
@@ -184,23 +197,25 @@ export function increase(params: {
  * This endpoint names the position `tokenId`, where `/lp/decrease` and `/lp/increase` name it `nftTokenId`.
  * Sending `nftTokenId` here fails with `ClaimFeesRequest validation error: "tokenId" is not allowed to be
  * empty`. Established against the live gateway, and one for FEEDBACK.md.
+ *
+ * It also takes no token addresses at all. `ClaimFeesRequest` in the live OpenAPI document declares exactly
+ * `protocol`, `walletAddress`, `chainId`, `tokenId`, `simulateTransaction` and `collectAsWeth`, and the
+ * gateway happens to ignore anything else rather than rejecting it, which is how `token0Address` and
+ * `token1Address` sat in this body being silently discarded while the terminal client correctly omitted them.
+ * Sending a field the schema does not declare is a claim about the API that is not true.
  */
 export function claimFees(params: {
   chainId: number
   protocol?: Protocol
   walletAddress: string
   tokenId: string
-  token0: string
-  token1: string
 }) {
   return post<Record<string, unknown>>('POST /lp/claim_fees', '/lp/claim_fees', {
     walletAddress: params.walletAddress,
     chainId: params.chainId,
     protocol: params.protocol ?? 'V4',
     tokenId: params.tokenId,
-    token0Address: params.token0,
-    token1Address: params.token1,
-    simulateTransaction: false,
+    simulateTransaction: LP_SIMULATE_TRANSACTION,
   })
 }
 

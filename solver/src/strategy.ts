@@ -73,7 +73,6 @@ export interface Deployments {
   pool?: { currency0: string; currency1: string; fee: number; tickSpacing: number; poolId: string }
   position?: { tokenId?: string; liquidity?: string; owner?: string }
   strategy?: StrategyRecord
-  fills?: unknown[]
   [k: string]: unknown
 }
 

@@ -58,11 +58,10 @@ export async function requestQuote(params: {
   amount: bigint
   isExactIn: boolean
   isAToB: boolean
-  takerTraitsAndData?: Hex
 }): Promise<QuoteResult> {
-  const takerTraitsAndData =
-    params.takerTraitsAndData ??
-    buildQuoteTakerTraits({ isExactIn: params.isExactIn, isAToB: params.isAToB })
+  // Built here, never taken from the record. The traits carry the direction flag, so a published blob would
+  // silently outrank the toggle on the page and quote the other side of the book.
+  const takerTraitsAndData = buildQuoteTakerTraits({ isExactIn: params.isExactIn, isAToB: params.isAToB })
 
   const [amountIn, amountOut, orderHash] = await publicClient.readContract({
     address: params.router,

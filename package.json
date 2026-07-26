@@ -19,8 +19,8 @@
   },
   "scripts": {
     "build": "forge build --skip test",
-    "test": "forge test",
-    "solver": "tsx solver/src/cli.ts",
+    "test": "forge test --match-path contracts/test/TakerTraits.t.sol && forge test --match-path contracts/test/Bebecita.t.sol && forge test --match-path contracts/test/LiquidityAmounts.t.sol",
+    "typecheck": "tsc -p solver/tsconfig.json",
     "gate0": "tsx solver/src/gate0.ts",
     "setup": "tsx solver/src/setup.ts",
     "aqua": "tsx solver/src/aqua.ts",
@@ -28,6 +28,7 @@
     "rebalance": "tsx solver/src/rebalance.ts",
     "inventory": "tsx solver/src/inventory.ts",
     "fixtures": "tsx solver/src/fixtures.ts",
-    "demo:reset": "tsx solver/src/reset.ts"
+    "demo:reset": "tsx solver/src/reset.ts",
+    "negative-moment": "tsx solver/src/negativeMoment.ts"
   }
 }

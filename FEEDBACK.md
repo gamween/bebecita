@@ -144,6 +144,33 @@ neighbouring endpoints rather than merely misspelled.
 
 Suggestion: accept `nftTokenId` on `/lp/claim_fees` as an alias, and report unknown keys by name.
 
+### The AquaSwapVMRouter deployed on Sepolia is not the contract the published source builds
+
+`0x8fdd04dbf6111437b44bbca99c28882434e0958f` on Ethereum Sepolia answers `hash(order)` correctly, and Aqua
+registers a strategy shipped under it correctly, so it is recognisably an `AquaSwapVMRouter`. But `quote()`
+reverts with completely empty return data for an order built against `swap-vm` at the commit this project pins,
+and it does so even for an order that was never shipped, where a router built from that source reverts with
+`SafeBalancesForTokenNotInActiveStrategy` carrying its four arguments. The runtime bytecode is also a different
+size from a router built from that source.
+
+Reproduce, with any well formed modern order:
+
+```
+cast call 0x8fdd04dbf6111437b44bbca99c28882434e0958f \
+  "quote((address,uint256,bytes),uint256,bytes)(uint256,uint256,bytes32)" \
+  "(<maker>,<traits>,<data>)" <amount> <takerTraits> --rpc-url <sepolia>
+# execution reverted, data: "0x"
+```
+
+The same call against a router deployed from the current source returns named errors throughout.
+
+Impact: a team that reads the README, finds the deployed address, and builds against `main` cannot execute
+against that deployment and gets no error to work from. We only found it because we tried to run our own book
+through your router as a control experiment.
+
+Suggestion: publish the commit each deployment was built from, or redeploy the testnet router from `main`. A
+deployments table with a commit column would remove the whole class of problem.
+
 ## 1inch
 
 ### 11. The custom SwapVM example in `1inch/sdks` no longer compiles against `swap-vm@main`

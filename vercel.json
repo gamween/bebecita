@@ -1,0 +1,13 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "cd app && yarn build",
+  "outputDirectory": "app/dist",
+  "installCommand": "yarn install && cd app && yarn install",
+  "framework": null,
+  "rewrites": [
+    {
+      "source": "/api/uniswap/:path*",
+      "destination": "/api/uniswap?path=:path*"
+    }
+  ]
+}

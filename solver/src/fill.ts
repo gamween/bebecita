@@ -25,7 +25,6 @@ import {
   http,
   parseAbi,
   parseEventLogs,
-  type Address,
   type Hex,
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
@@ -33,6 +32,7 @@ import { sepolia } from 'viem/chains'
 
 import { SEPOLIA, env } from './config.js'
 import { planFill, type ChainReader, type LiquidityApi } from './fillPlan.js'
+import { REVERT_ERRORS } from './revertAbi.js'
 import {
   FILL_REQUEST_PATH,
   FILL_REQUEST_RELATIVE,
@@ -52,11 +52,19 @@ const erc20Abi = parseAbi([
   'function symbol() view returns (string)',
 ])
 
+/**
+ * The router, plus every custom error a fill can revert with.
+ *
+ * viem decodes a custom error only when its definition is in the ABI it was handed, so without
+ * `REVERT_ERRORS` a reverted simulation prints a bare selector and the name of the guard that fired is lost.
+ * The browser parses the same list into its own router ABI.
+ */
 const routerAbi = parseAbi([
   'struct Order { address maker; uint256 traits; bytes data; }',
   'function quote(Order order, uint256 amount, bytes takerTraitsAndData) view returns (uint256 amountIn, uint256 amountOut, bytes32 orderHash)',
   'function swap(Order order, uint256 amount, bytes takerTraitsAndData) payable returns (uint256 amountIn, uint256 amountOut, bytes32 orderHash)',
   'event Swapped(bytes32 orderHash, address maker, address taker, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut)',
+  ...REVERT_ERRORS,
 ])
 
 const vaultAbi = parseAbi([
@@ -216,6 +224,7 @@ async function main() {
     amount,
     unitsPerLiquidityE18: strategy.params.unitsPerLiquidityE18,
     maxUnwindPct: strategy.params.maxUnwindPct,
+    haircutBps: strategy.params.haircutBps,
     onStep: ({ index, label }) => step(index, label),
   })
 
@@ -232,7 +241,11 @@ async function main() {
   info('/lp/decrease    ', `${plan.unwindPercent}% -> ${tokens(plan.releasedIn, symbolIn)} + ${tokens(plan.releasedOut, symbolOut)}`)
   info('calldata        ', `${(plan.decreaseCalldata.length - 2) / 2} bytes`)
   info('surplus float   ', `${tokens(plan.surplus, symbolOut)} stays in the vault, the cost of an integer percentage`)
-  info('/lp/increase    ', `${tokens(plan.redeposit, symbolOut)} named, the API computes the other leg`)
+  info(
+    '/lp/increase    ',
+    `${tokens(plan.redeposit, plan.redepositToken === plan.tokenOut ? symbolOut : symbolIn)} named on the side ` +
+      "the pool's ratio makes scarce, the API computes the other leg",
+  )
   info('calldata        ', `${(plan.increaseCalldata.length - 2) / 2} bytes`)
   info('taker traits    ', `${(plan.takerTraitsAndData.length - 2) / 2} bytes`)
   info('api quota left  ', uniswap.remainingQuota ?? 'n/a')

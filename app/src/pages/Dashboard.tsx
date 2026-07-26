@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { parseUnits, type Address, type Hex } from 'viem'
 import { useConnection, useWalletClient } from 'wagmi'
 
+import { FULL_RANGE_TICK_LOWER, FULL_RANGE_TICK_UPPER } from '@solver/ticks'
 import { NetworkPanel } from '../components/NetworkPanel'
 import {
   Addr,
@@ -572,7 +573,6 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
         amount: parseUnits(amountInput || '0', inDecimals),
         isExactIn: true,
         isAToB: aToB,
-        takerTraitsAndData: config.deployment.takerTraitsAndData,
       })
       setQuote({ status: 'ok', value })
     } catch (error) {
@@ -603,6 +603,7 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
     if (!token0 || !token1) return { ok: false, reason: 'the pool key has not been read yet' }
     if (!snapshot.vault.unitsPerLiquidityE18.ok) return { ok: false, reason: snapshot.vault.unitsPerLiquidityE18.reason }
     if (!snapshot.vault.maxUnwindPct.ok) return { ok: false, reason: snapshot.vault.maxUnwindPct.reason }
+    if (!snapshot.vault.haircutBps.ok) return { ok: false, reason: snapshot.vault.haircutBps.reason }
 
     return {
       ok: true,
@@ -621,6 +622,7 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
         token1,
         unitsPerLiquidityE18: snapshot.vault.unitsPerLiquidityE18.value,
         maxUnwindPct: snapshot.vault.maxUnwindPct.value,
+        haircutBps: snapshot.vault.haircutBps.value,
         chainId,
         dry: dryRun,
       },
@@ -726,13 +728,11 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
     setClaim({ status: 'pending' })
     executeTx.reset()
     try {
-      const key = snapshot.vault.keyUsed
+      // No token addresses: `ClaimFeesRequest` does not declare them, the position is named by `tokenId` alone.
       const { payload } = await claimFees({
         chainId,
         walletAddress: vaultAddress,
         tokenId: tokenId.toString(),
-        token0: key.currency0,
-        token1: key.currency1,
       })
       setClaim({ status: 'ok', value: { tx: findTransactionRequest(payload), payload } })
     } catch (error) {
@@ -1225,7 +1225,8 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
                     {snapshot.uniswap.tickLower.value} to {snapshot.uniswap.tickUpper.value}
                   </Num>
                   <Unit>
-                    {snapshot.uniswap.tickLower.value <= -887220 && snapshot.uniswap.tickUpper.value >= 887220
+                    {snapshot.uniswap.tickLower.value <= FULL_RANGE_TICK_LOWER &&
+                    snapshot.uniswap.tickUpper.value >= FULL_RANGE_TICK_UPPER
                       ? 'full range'
                       : 'bounded'}
                   </Unit>

@@ -54,6 +54,7 @@ import { privateKeyToAccount } from 'viem/accounts'
 import { sepolia } from 'viem/chains'
 
 import { SEPOLIA, env } from './config.js'
+import { bindingSide } from './sizing.js'
 import { loadStrategy, readDeployments, writeDeployments } from './strategy.js'
 import { UniswapClient, type TransactionRequest } from './uniswap.js'
 
@@ -423,10 +424,14 @@ async function main() {
   }
 
   // Which side runs out first decides which one names the deposit, because the API computes the other leg from
-  // the pool and will happily name an amount the vault does not hold.
-  const zeroIsBinding = held0 * reserve1 <= held1 * reserve0
-  const independentToken = zeroIsBinding ? token0 : token1
-  const independentHeld = zeroIsBinding ? held0 : held1
+  // the pool and will happily name an amount the vault does not hold. Same function the fill sizes its
+  // redeposit with, for the same reason, so there is one copy of that comparison in the repository.
+  const binding = bindingSide(
+    { token: token0, held: held0, reserve: reserve0 },
+    { token: token1, held: held1, reserve: reserve1 },
+  )
+  const independentToken = binding.token
+  const independentHeld = binding.held
   info('binding side    ', `${symbolOf(independentToken)}, so it names the deposit and the API computes the other leg`)
 
   let increase: { increase: TransactionRequest; token0?: unknown; token1?: unknown } | null = null
@@ -538,7 +543,13 @@ async function main() {
   }
   writeDeployments(deployments)
   console.log('\n    written to      deployments/sepolia.json, under rebalance')
-  console.log(`\nRebalanced. https://sepolia.etherscan.io/tx/${swapHash}\n`)
+
+  // The two halves are independent, so a run that only redeposits has no swap to link. Naming the transaction
+  // that did happen beats an etherscan URL ending in `null`.
+  const closing = swapHash ?? increaseHash
+  const closingLabel = swapHash ? 'the swap' : 'the redeposit'
+  if (closing) console.log(`\nRebalanced. ${closingLabel}, https://sepolia.etherscan.io/tx/${closing}\n`)
+  else console.log('\nRebalanced. Nothing was broadcast, the book was already where this command aims.\n')
 }
 
 /** `approve(address,uint256)` payloads carry the spender in the first argument word. */

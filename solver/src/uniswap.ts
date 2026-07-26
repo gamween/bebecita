@@ -11,6 +11,8 @@
  * with no version prefix. Grepping request logs for `trade-api` will therefore find nothing.
  */
 
+import { LP_SIMULATE_TRANSACTION, LP_SLIPPAGE_TOLERANCE_PCT } from './lpParams.js'
+
 const LP_HOST = 'https://liquidity.api.uniswap.org'
 const TRADE_HOST = 'https://trade-api.gateway.uniswap.org/v1'
 
@@ -191,7 +193,7 @@ export class UniswapClient {
       protocol: this.config.protocol,
       action: params.action ?? 'CREATE',
       generatePermitAsTransaction: true,
-      simulateTransaction: false,
+      simulateTransaction: LP_SIMULATE_TRANSACTION,
       lpTokens: [
         { tokenAddress: params.token0, amount: params.amount0 },
         { tokenAddress: params.token1, amount: params.amount1 },
@@ -245,8 +247,8 @@ export class UniswapClient {
       },
       tickBounds: { tickLower: params.tickLower, tickUpper: params.tickUpper },
       independentToken: { tokenAddress: params.independentToken, amount: params.independentAmount },
-      slippageTolerance: params.slippageTolerance ?? 0.5,
-      simulateTransaction: false,
+      slippageTolerance: params.slippageTolerance ?? LP_SLIPPAGE_TOLERANCE_PCT,
+      simulateTransaction: LP_SIMULATE_TRANSACTION,
     })
   }
 
@@ -280,8 +282,8 @@ export class UniswapClient {
       token0Address: params.token0,
       token1Address: params.token1,
       liquidityPercentageToDecrease: percent,
-      slippageTolerance: params.slippageTolerance ?? 0.5,
-      simulateTransaction: false,
+      slippageTolerance: params.slippageTolerance ?? LP_SLIPPAGE_TOLERANCE_PCT,
+      simulateTransaction: LP_SIMULATE_TRANSACTION,
     })
   }
 
@@ -310,8 +312,8 @@ export class UniswapClient {
       token0Address: params.token0,
       token1Address: params.token1,
       independentToken: { tokenAddress: params.independentToken, amount: params.independentAmount },
-      slippageTolerance: params.slippageTolerance ?? 0.5,
-      simulateTransaction: false,
+      slippageTolerance: params.slippageTolerance ?? LP_SLIPPAGE_TOLERANCE_PCT,
+      simulateTransaction: LP_SIMULATE_TRANSACTION,
     })
   }
 
@@ -329,7 +331,7 @@ export class UniswapClient {
       chainId: this.config.chainId,
       protocol: this.config.protocol,
       tokenId: String(params.tokenId),
-      simulateTransaction: false,
+      simulateTransaction: LP_SIMULATE_TRANSACTION,
     })
   }
 

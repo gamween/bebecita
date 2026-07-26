@@ -1,14 +1,10 @@
-import { formatUnits, type Address, type Hex } from 'viem'
+import { formatUnits } from 'viem'
 
 /** A value that was read, or a stated reason why it could not be. Nothing in this app invents a number. */
 export type Result<T> = { ok: true; value: T } | { ok: false; reason: string }
 
 export const ok = <T>(value: T): Result<T> => ({ ok: true, value })
 export const unavailable = <T>(reason: string): Result<T> => ({ ok: false, reason })
-
-export function mapResult<T, U>(result: Result<T>, fn: (value: T) => U): Result<U> {
-  return result.ok ? ok(fn(result.value)) : result
-}
 
 export function reason(error: unknown): string {
   if (error instanceof Error) return error.message.split('\n')[0]
@@ -91,14 +87,6 @@ export function shortAddress(value: string): string {
 export function shortHash(value: string): string {
   if (value.length <= 20) return value
   return `${value.slice(0, 10)}…${value.slice(-8)}`
-}
-
-export function isAddress(value: unknown): value is Address {
-  return typeof value === 'string' && /^0x[0-9a-fA-F]{40}$/.test(value)
-}
-
-export function isHex(value: unknown): value is Hex {
-  return typeof value === 'string' && /^0x[0-9a-fA-F]*$/.test(value)
 }
 
 /** JSON that survives bigints, used by the network panel and the raw payload views. */

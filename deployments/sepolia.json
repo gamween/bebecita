@@ -114,5 +114,21 @@
       "0xeac7495bd56a0e341447a1eb58942102b2985d2c73d0611a873252aa0b57bb53",
       "0xec8c7a4e9a05786eed742944d87b01da954b9e66c4bc4b20ce659a66e6ae63b2"
     ]
+  },
+  "negativeMoment": {
+    "app": "0x354422f6e4e3476b540E306A6DdFb4638d9EA5c3",
+    "orderHash": "0x0df88363db5c8abacd7b471d183cb8c53b946f6c46e5115315afe3ecc19acdec",
+    "shipTx": "0x62c39a1f07cc079ddb4b40958aab9575785b218cd5c76b6fec0665d36cb3e726",
+    "shipped": {
+      "token0": "22758531411610352151438",
+      "token1": "866991672823251510531000"
+    },
+    "order": {
+      "maker": "0xE703F509ba1bF70BcFa4957a7090e73B627dE76a",
+      "traits": "28948022309345504152553859025372987423956659195481894094225317213215909740544",
+      "data": "0x0128Ac6B5E3364b022e55A0cf9c0cb4987B3B20fdB41CB0A2EEFF8Ed53Ef019D4C9826744f500B7F51400000000000000000000000000000000000000000000000000000000035984b25000000000000000000000000000000000000000002e7c75287493b0c576cf2000201b1"
+    },
+    "note": "hookless [0x51][0x02] program on our router, no 0x92, so the quote is never clamped",
+    "makerIsThePreviousVault": "recorded before the conservation guard redeploy, so its maker is 0xE703F509ba1bF70BcFa4957a7090e73B627dE76a. Re-running the script re-ships from deployments.vault, which is the current maker."
   }
 }
