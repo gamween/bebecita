@@ -48,7 +48,7 @@ npm run snapshot                                         # starts with a clean, 
 | `contracts/src/instructions/UnwindPricedBalances.sol` | The custom instruction, opcode `0x92`. Pure `view`, clamps `balanceOut`. |
 | `contracts/src/opcodes/BebecitaOpcodes.sol` | Our opcode table. Subclasses `AquaOpcodes`, adds `0x92`, rewires three dead `Controls`. |
 | `contracts/src/routers/BebecitaRouter.sol` | The redeployed SwapVM. Points at the official Aqua. |
-| `contracts/src/vault/BebecitaVault.sol` | The maker. Holds the position, implements the hooks and their four guards, reports URC-3. |
+| `contracts/src/vault/BebecitaVault.sol` | The maker. Holds the position, implements the hooks and their five guards, reports URC-3. |
 | `contracts/test/Bebecita.t.sol` | Everything above, asserted. Start here to understand the system. |
 | `contracts/test/TakerTraits.t.sol` | The TypeScript traits builder, diffed byte for byte against `TakerTraitsLib.build`. Fixtures from `yarn fixtures`. |
 | `solver/src/takerTraits.ts` | The port of `TakerTraitsLib.build`. Imported by the browser too. Read it next to the Solidity. |

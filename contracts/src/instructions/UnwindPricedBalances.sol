@@ -4,7 +4,6 @@ pragma solidity 0.8.30;
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import { Calldata } from "@1inch/solidity-utils/contracts/libraries/Calldata.sol";
 import { Context } from "@1inch/swap-vm/src/libs/VM.sol";
 
 /// @title UnwindPricedBalancesArgsBuilder
@@ -82,20 +81,24 @@ library UnwindPricedBalancesArgsBuilder {
 ///      `MinRate`: both amount registers must still be zero, which holds in exact-in and exact-out alike.
 ///
 /// @dev QUOTE/SWAP DIVERGENCE: none. This instruction is `view`. It writes no storage, so `isStaticContext`
-///      is irrelevant to it and `quote()` and `swap()` return identical amounts by construction. This is the
-///      only invariant of the SwapVM core suite that cannot be skipped, and this instruction satisfies it
-///      structurally rather than by discipline.
+///      is irrelevant to it and `quote()` and `swap()` return identical amounts by construction. Quote/swap
+///      consistency is one of the two invariants of the SwapVM core suite that are never skipped, the other
+///      being balance sufficiency, which `CoreInvariants.t.sol` also asserts unconditionally. Those two are
+///      exactly this project's subject: instruction `0x92` is balance sufficiency enforced one instruction
+///      before settlement, and it satisfies quote/swap consistency structurally rather than by discipline.
 ///
 /// @dev The instruction only ever lowers `balanceOut`. It never raises it, and it never touches `balanceIn`:
 ///      on the constant-product curves wired into the Aqua opcode table, lowering `balanceIn` would raise the
 ///      amount paid out, which is the exact opposite of the intent.
 contract UnwindPricedBalances {
-    using Calldata for bytes;
-
     /// @dev The external liquidity source did not answer with a single word.
     error PositionLiquidityCallFailed(address positionManager, uint256 tokenId);
     /// @dev Instruction was placed after the swap amounts were computed.
     error UnwindShouldBeCalledBeforeSwapAmountsComputation(uint256 amountIn, uint256 amountOut);
+    /// @dev Haircut above one hundred percent, which the builder rejects and a hand written program can still
+    ///      reach. Checked at the use site so the taker gets a named error rather than an arithmetic panic
+    ///      out of `_BPS - haircutBps`, which names nothing.
+    error HaircutOutOfRange(uint16 haircutBps);
 
     /// @dev `IPositionManager.getPositionLiquidity(uint256)`, verified against the Uniswap v4
     ///      PositionManager deployed on Ethereum Sepolia at 0x429ba70129df741B2Ca2a85BC3A2a3328e5c09b4.
@@ -123,6 +126,8 @@ contract UnwindPricedBalances {
             uint8 maxUnwindPct,
             uint128 unitsPerLiquidityE18
         ) = UnwindPricedBalancesArgsBuilder.parse(args);
+
+        require(haircutBps <= _BPS, HaircutOutOfRange(haircutBps));
 
         uint256 reachable = _reachableFromPosition(
             positionManager, tokenId, haircutBps, maxUnwindPct, unitsPerLiquidityE18

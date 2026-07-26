@@ -42,8 +42,13 @@ value of the position read on chain, and the haircut. The quote now returns a sm
 position."
 
 If URC-3 is wired, this is where it lands, ten seconds: `supportsInterface` returns true, then `getReserves`
-and `getEffectiveLiquidity` side by side, and the second number is exactly what the instruction clamps to
-three lines further down the trace.
+and `getEffectiveLiquidity` side by side, both reading the position's real content per token off the pool
+price rather than assuming the two sides are equal.
+
+Ten more seconds, and worth taking, because it is the only place in the demo where the maker is the adversary:
+`test_Attack_WouldHavePassedTheFirstThreeGuards`. One payload unwinds the whole per fill cap, pays the vault
+exactly what the fill owes and keeps the rest. Three of the four original guards say yes. The fifth prices what
+came out of the position and says no.
 
 ## 1:20 to 2:20, the fill, where both legs become visible
 
@@ -64,9 +69,10 @@ In the middle, one transaction. Walk the trace slowly:
 4. `AQUA.push`, the taker's input reaches the vault.
 5. `postTransferIn`, the vault redeposits.
 
-Point at steps 2 and 3: "those are consecutive statements in your source, `SwapVM.sol:310` and `:321`.
-`preTransferOut` is the only place in SwapVM guaranteed to run just before tokens leave the maker, in both
-transfer orders. We found that by reading your code."
+Point at steps 2 and 3: "`SwapVM.sol:310` and `:321`. `preTransferOut` is the last maker controlled point
+before the tokens leave, in both transfer orders. The only thing that can run in between is `:316-319`, a
+callback the taker has to ask for and that runs the taker's own code, which is why our guards check balances
+instead of trusting the order. We found all of that by reading your source."
 
 Open the transaction on sepolia.etherscan.io. Two PositionManager calls and a `Swapped` event, one hash.
 

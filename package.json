@@ -7,7 +7,7 @@
   "dependencies": {
     "@1inch/aqua": "github:1inch/aqua#v1.0.0",
     "@1inch/solidity-utils": "6.9.10",
-    "@1inch/swap-vm": "github:1inch/swap-vm#main",
+    "@1inch/swap-vm": "github:1inch/swap-vm#b5e0e4d72242ec44ac636d5e6ce0c5686619b00d",
     "@openzeppelin/contracts": "5.4.0",
     "forge-std": "github:foundry-rs/forge-std#v1.11.0"
   },
@@ -19,7 +19,7 @@
   },
   "scripts": {
     "build": "forge build --skip test",
-    "test": "forge test --match-path contracts/test/TakerTraits.t.sol && forge test --match-path contracts/test/Bebecita.t.sol",
+    "test": "forge test --match-path contracts/test/TakerTraits.t.sol && forge test --match-path contracts/test/Bebecita.t.sol && forge test --match-path contracts/test/LiquidityAmounts.t.sol",
     "typecheck": "tsc -p solver/tsconfig.json",
     "gate0": "tsx solver/src/gate0.ts",
     "setup": "tsx solver/src/setup.ts",

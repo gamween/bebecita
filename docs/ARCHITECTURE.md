@@ -39,8 +39,12 @@ With the flag unset, `SwapVM.sol:227-229`, the two halves swap: `preTransferOut`
 
 Two facts follow, and the whole design is built on them.
 
-`preTransferOut` always immediately precedes the pull. It is therefore the only point in the system guaranteed
-to run just before tokens leave the maker, in either ordering. That is the funding window.
+`preTransferOut` is the last maker controlled point before the pull, in either ordering. That is the funding
+window. It is not the statement immediately before it, and the trace above says so in its own lines: the taker
+callback at `:316-319` sits in between. That callback runs only when the taker sets
+`hasPreTransferOutCallback`, and what it runs is the taker's own code, so it can neither be relied on nor be
+surprised by. Which is the reason the vault's guards measure realised balances instead of trusting a
+sequence.
 
 `postTransferIn` is the only hook that always runs after the push. It is therefore the only place where a
 redeposit can be funded with the taker's input.
@@ -68,8 +72,11 @@ It never touches `balanceIn`. On the constant product curves wired into the Aqua
 raises the payout, so an instruction that touched it would quote more generously exactly when the maker is
 less solvent.
 
-It is `view`. It writes no storage, so `isStaticContext` is irrelevant to it and quote/swap consistency, the
-only invariant of the core suite that cannot be skipped, holds structurally rather than by discipline.
+It is `view`. It writes no storage, so `isStaticContext` is irrelevant to it and quote/swap consistency holds
+structurally rather than by discipline. That is one of the two invariants of the core suite that are never
+skipped: `CoreInvariants.t.sol` gives symmetry, monotonicity, additivity and spot price a skip flag each, and
+gives quote/swap consistency and balance sufficiency none. Balance sufficiency is what this instruction is
+about, so the two invariants nobody may turn off are the two this project is built on.
 
 Its position guard, `require(amountIn == 0 || amountOut == 0)`, mirrors `Decay`, `Fee` and `MinRate`, and
 forces it to sit before the curve.
@@ -121,14 +128,38 @@ points. Beyond that it does not attempt to decode the payload, because the real 
 and any decoder we wrote would be a second implementation to get wrong. Instead it judges the payload by its
 effects, and it has the numbers to do so because `preTransferOut` receives `amountOut` as a parameter.
 
-Four guards:
+Five guards:
 
 1. after the unwind, the output balance must have grown by at least `amountOut`. A floor, not a sign check.
 2. the input side balance may not shrink, so a payload cannot drain the other half of the book.
 3. the position's liquidity may not fall by more than `maxUnwindPct`, so one fill cannot empty the collateral.
 4. a redeposit may only grow the position.
+5. the value the unwind released must land in the vault, within `haircutBps`.
 
-A taker therefore chooses how to unwind and never whether the maker ends up short.
+The fifth exists because the first four are not enough, and saying why is more useful than listing it.
+
+None of the first four can see where the released tokens went. `modifyLiquidities` composes v4 Actions freely,
+so `DECREASE_LIQUIDITY` followed by `TAKE` with arbitrary recipients lets a taker unwind the entire per fill
+cap, hand the vault exactly `amountOut` and keep the rest of both tokens. Guard 1 is met exactly, because a
+floor asks for nothing more. Guard 2 is met with equality, because the released tokenIn never arrives and a
+balance that does not move cannot fall. Guard 3 is met at the cap, because it bounds liquidity and not value.
+Repeat with dust sized fills and the position drains at `maxUnwindPct` per fill, with every guard green.
+
+Guard 5 prices the liquidity actually removed into both tokens and compares it against what the vault gained.
+That needs three things the vault previously had no way to obtain: the live pool price, the position's tick
+bounds, and the conversion from liquidity to amounts. The first two are read on chain, from
+`StateView.getSlot0` and `PositionManager.getPoolAndPositionInfo`, both hardened the way `_positionLiquidity`
+and `Fee.sol:148-160` are, with pinned return lengths and no fail open path inside a hook. The third is
+`contracts/src/libraries/LiquidityAmounts.sol`, the standard v4 conversion with its three cases, vendored
+because neither v4-core nor v4-periphery is reachable through this dependency tree, and checked against
+published constants and against a factor `yarn rebalance` measured on Sepolia.
+
+The tolerance is `haircutBps` rather than a knob of its own. The haircut already says how much slack the maker
+accepts between what the position is worth and what it will count on, and one number that means one thing
+survives a demo better than two that drift apart.
+
+A taker therefore chooses how to unwind and never whether the maker ends up short, nor where the released
+collateral lands.
 
 ## Inventory
 
@@ -238,9 +269,9 @@ strategy is a number in a mapping and somebody outside has to decide when to pul
 
 So the question is never whether a solver runs off chain, it is whether the maker has to trust it. This maker
 does not. The order is immutable, the vault's parameters are immutable, and the one thing the taker supplies
-per fill, the withdrawal calldata, is judged on chain by the four guards above rather than believed. An
-adversarial taker chooses how the position is unwound and never whether the maker ends up short, never what
-the vault ends up owning, and never more than `maxUnwindPct` of the collateral in one fill.
+per fill, the withdrawal calldata, is judged on chain by the five guards above rather than believed. An
+adversarial taker chooses how the position is unwound and never whether the maker ends up short, never where
+the released collateral lands, and never more than `maxUnwindPct` of it in one fill.
 
 That is why the taker being a browser tab changes nothing about the security model, and why deleting the
 backend cost nothing: there was no trust placed in it to remove. It also makes the demo self serve, which is
@@ -255,6 +286,12 @@ that invariant enforced inside a virtual machine one instruction before settleme
 
 URC-3's motivating cases name, verbatim, deploying liquidity in external protocols, rehypothecating assets and
 maintaining reserves outside the PoolManager. This vault does all three.
+
+Both accessors report real per token amounts: the position's content at the live pool price, plus the vault's
+free float on whichever side it sits on. They used to credit one scalar to both tokens, which is exact at
+parity and wrong everywhere else, in a direction that depends on which way the pool has moved. They also
+validate that the `PoolKey` handed to them is the pool backing the position and revert otherwise, which the
+standard's conformance list requires and which the float lookups alone would otherwise have papered over.
 
 The standard is scoped to v4 hooks and makes `hook()` mandatory for conformance, which does not fit a contract
 that holds reserves without being a hook. We return the zero address and reported the gap upstream in
@@ -274,6 +311,13 @@ program, not a second opcode, and the sponsor's own whitepaper calls the alterna
 `Decay` is not in the program stack. Its own NatSpec announces a quote versus swap divergence, and quote/swap
 consistency is the one invariant we claim structurally.
 
-Tick math is not reproduced on chain. The conversion from position liquidity to output units is a conservative
-maker parameter, and the real figure is enforced after the fact by the hook's delta check. Reimplementing v4
-pricing in view would be a night of work for a number the guards already verify.
+Tick math is reproduced on chain, and it used not to be. The note that stood here said the conversion from
+liquidity to output units was a conservative maker parameter enforced after the fact by the hook's delta
+check, and that reimplementing v4 pricing would be work for a number the guards already verified. That was
+wrong in a way worth recording: the guards did not verify it. They verified that enough of one token arrived,
+not that everything the position released did, and closing that needed exactly the tick math the note declined
+to write. `LiquidityAmounts.sol` is the smallest version of it, two routines and their three cases.
+
+What is still a maker parameter is `unitsPerLiquidityE18`, which instruction `0x92` uses to price the clamp in
+a `view` without reading the pool. It drifts as the pool moves off parity, `yarn rebalance` prints the drift,
+and the fix is to re-ship with the measured factor. The guards and the URC-3 report no longer depend on it.

@@ -13,7 +13,7 @@
 | Contract | Address |
 |---|---|
 | BebecitaRouter, our modified SwapVM | [`0x354422f6e4e3476b540E306A6DdFb4638d9EA5c3`](https://sepolia.etherscan.io/address/0x354422f6e4e3476b540E306A6DdFb4638d9EA5c3) |
-| BebecitaVault, the maker | [`0xE703F509ba1bF70BcFa4957a7090e73B627dE76a`](https://sepolia.etherscan.io/address/0xE703F509ba1bF70BcFa4957a7090e73B627dE76a) |
+| BebecitaVault, the maker | [`0x6A64a5BB9704119bb651b4f08D09b065F48902CD`](https://sepolia.etherscan.io/address/0x6A64a5BB9704119bb651b4f08D09b065F48902CD) |
 | bALPHA | [`0xdB41CB0A2EEFF8Ed53Ef019D4C9826744f500B7F`](https://sepolia.etherscan.io/address/0xdB41CB0A2EEFF8Ed53Ef019D4C9826744f500B7F) |
 | bBRAVO | [`0x0128Ac6B5E3364b022e55A0cf9c0cb4987B3B20f`](https://sepolia.etherscan.io/address/0x0128Ac6B5E3364b022e55A0cf9c0cb4987B3B20f) |
 
@@ -23,12 +23,17 @@ The maker's inventory, opened through the Uniswap API and owned by the vault:
 |---|---|
 | Position | v4 NFT [`#37804`](https://sepolia.etherscan.io/token/0x429ba70129df741B2Ca2a85BC3A2a3328e5c09b4?a=37804), full range, 100,000 of each token |
 | Pool | `0x25f7dd131e5548b22a4bf9b95587514d69960261c1defff0ec465f9f90d54489`, fee 3000, spacing 60, no hook |
-| Reachable per fill | 23,503 tokens, which is 25% of the position after a 5% haircut |
-| Aqua strategy | `0x9f853f6da4f2ad117c0a19545466e28be0343bf17f4d07067ffbcfa55d6e9da3` |
+| Reachable per fill | 21,453.97 bALPHA, which is 25% of the position after a 5% haircut. `getEffectiveLiquidity` reports the same figure on that side and 26,535.12 bBRAVO on the other, because the pool no longer sits at parity |
+| Aqua strategy | `0x5558177a9c2fafbf360d32c575576bac9cd7603b1d52c91821b0a08fe9015207` |
 | Program | `[0x92 unwind][0x51 concentrate][0x02 salt]`, 142 bytes, the curve bounded by the position's own range |
 
-The vault was redeployed once the position existed, because `TOKEN_ID` is immutable and the first deployment
-predated the pool. That is the whole reason the address above differs from the one in the deploy transaction.
+The vault has been deployed three times, and both redeployments are for the same reason: what a taker needs
+to be able to read off an immutable maker cannot live behind a setter. The first was constructed before the
+position existed, so `TOKEN_ID` was zero. The second, `0xE703F509ba1bF70BcFa4957a7090e73B627dE76a`, could not
+read the pool price, which the conservation guard needs to value what a withdrawal released, so `STATE_VIEW`
+joined the immutables. The position NFT moved across in
+[`0xa2516a9a…`](https://sepolia.etherscan.io/tx/0xa2516a9a7ccca1a9bf06f80aa952e0f45b5f263db21af14788e3d0835d5dbfab),
+the float followed, and the book was re-shipped from the new maker.
 
 The router's `AQUA()` getter returns `0x499943E74FB0cE105688beeE8Ef2ABec5D936d31`, the canonical Aqua address, which is the one line that
 proves the official contracts are the ones doing the work. Its `OPCODE_UNWIND_PRICED_BALANCE_OUT()` returns
@@ -50,7 +55,7 @@ flowchart LR
     HOOK2["postTransferIn<br/>vault executes /lp/increase<br/>the inventory goes back to work"]
 
     CURVE --> HOOK1
-    HOOK1 -->|"SwapVM.sol:310-314 then :321, consecutive statements"| PULL
+    HOOK1 -->|"SwapVM.sol:310-314, then :321, the last maker controlled point"| PULL
     PULL --> PUSH
     PUSH --> HOOK2
 ```
@@ -83,17 +88,22 @@ There is no simultaneity here and the pitch should never claim any. The position
 |---|---|---|
 | 1 | `runLoop` | Instruction `0x92` reads the vault's free float and the position's liquidity, and clamps `balanceOut` to what is genuinely reachable. Instruction `0x51` then prices against the truth, on the position's own range, and clamps its own output at the same number if the taker asked for more. |
 | 2 | `SwapVM.sol:310-314` | `preTransferOut` fires. The vault executes the `/lp/decrease` calldata against the v4 PositionManager. The position unwinds, the vault receives the output token. |
-| 3 | `SwapVM.sol:321` → `Aqua.sol:63-70` | `AQUA.pull` runs on the very next statement and pays the taker. |
+| 3 | `SwapVM.sol:321` → `Aqua.sol:63-70` | `AQUA.pull` pays the taker. The only thing that can run between the hook and this line is `preTransferOutCallback`, `SwapVM.sol:316-319`, which fires only when the taker asks for it and is the taker's own code. |
 | 4 | `SwapVM.sol:262` | `AQUA.push` credits the vault with the taker's input. |
 | 5 | `SwapVM.sol:282-286` | `postTransferIn` fires. The vault executes the `/lp/increase` calldata. The inventory goes back to work. |
 
-Steps 2 and 3 are consecutive statements in the sponsor's own source, and that ordering holds in both transfer orders the router supports. `preTransferOut` is the only point in SwapVM guaranteed to run immediately before tokens leave the maker, which is the entire reason this design exists.
+`preTransferOut` is the last maker controlled point before the pull, and that holds in both transfer orders
+the router supports, which is the entire reason this design exists. It is not literally the statement before
+it: `SwapVM.sol:316-319` sits in between and calls `preTransferOutCallback` on the taker, but only when the
+taker sets `hasPreTransferOutCallback`, and what runs there is the taker's own code. That changes nothing the
+vault has to verify, and it is exactly why the guards below check realised balances instead of trusting an
+ordering.
 
 ## The instruction
 
 `_unwindPricedBalanceOut1D`, opcode `0x92`, in the `0x90-0xaf` balances tuning bank of `OpcodeList.sol`, whose rule reads: *"New instruction MUST take the next free `_Ix` slot of its family bank."* The claim is machine checked rather than asserted: `test_InstructionTakesReservedSlotOfBalancesTuningBank` asserts `uint256(Opcode._92)` equals the dispatched index.
 
-It is **fully `view`**. It writes no storage, so quote/swap consistency, the only invariant of the SwapVM core suite that cannot be skipped, is satisfied structurally rather than by discipline. It only ever lowers `balanceOut`, never raises it, and never touches `balanceIn`, because on a constant product curve lowering `balanceIn` would raise the payout, which is the opposite of the intent.
+It is **fully `view`**. It writes no storage, so quote/swap consistency, one of the two invariants of the SwapVM core suite that are never skipped, is satisfied structurally rather than by discipline. The other one is balance sufficiency, which `CoreInvariants.t.sol` asserts after every configurable check with no flag to turn it off, and which is precisely what this instruction enforces: the two invariants nobody may skip are this project's whole subject. It only ever lowers `balanceOut`, never raises it, and never touches `balanceIn`, because on a constant product curve lowering `balanceIn` would raise the payout, which is the opposite of the intent.
 
 ```
 balanceOut = min(balanceOut, float + reachable)
@@ -138,13 +148,38 @@ The withdrawal calldata comes from the taker, per fill, because the Uniswap API 
 1. after the unwind, the output balance must have grown by at least the amount the VM computed, which the hook receives as a parameter, so this is a floor and not a sign check;
 2. the other side of the book may not shrink;
 3. the position may not lose more liquidity than the maker authorised for one fill;
-4. a redeposit may only grow the position.
+4. a redeposit may only grow the position;
+5. the value the unwind actually released has to land in this vault.
 
-A taker can therefore choose *how* to unwind, but never whether the maker ends up short, and never what the vault ends up owning.
+The fifth is the one that makes the other four safe, and it exists because they were not. A real
+`modifyLiquidities` payload composes v4 Actions freely: `DECREASE_LIQUIDITY` on the token id, then `TAKE` or
+`TAKE_PAIR` naming any recipient at all. So a taker could unwind the whole of `maxUnwindPct`, route exactly
+`amountOut` to the vault and keep the entire remainder of both tokens. Guard 1 is a floor and was met exactly;
+guard 2 held with equality, because a balance that never moves cannot shrink; guard 3 caps liquidity and not
+value. Repeat with dust sized fills and the position drains at `maxUnwindPct` a time.
+
+Guard 5 closes it by pricing the liquidity actually removed into both tokens at the live pool price, read from
+the v4 `StateView` and the position's own tick bounds, and requiring the vault's combined gain to cover it. The
+tolerance is `haircutBps`, reused rather than invented, because it is already the maker's statement of how much
+slack it accepts between what the position is worth and what it will count on.
+`test_Attack_WouldHavePassedTheFirstThreeGuards` runs the attacker's payload straight at the position manager
+and asserts that each of the first three guards holds, before the same payload is put through a fill and
+rejected with `UnwindValueDiverted`.
+
+A taker can therefore choose *how* to unwind, but never whether the maker ends up short, and never where the
+released collateral lands.
 
 ## URC-3
 
-The vault implements [`IHookStats`](https://gov.uniswap.org/t/urc-3-hook-tvl-and-effective-liquidity-reporting/26155), the Uniswap Labs standard for reporting TVL and immediately swappable liquidity, created 2026-06-11. Its normative invariant is that `getEffectiveLiquidity` should not exceed `getReserves`, which is exactly what instruction `0x92` enforces inside the VM. URC-3's own motivating cases list, verbatim, *"deploy liquidity in external protocols"*, *"rehypothecate assets"* and *"maintain reserves outside the PoolManager"*.
+The vault implements [`IHookStats`](https://gov.uniswap.org/t/urc-3-hook-tvl-and-effective-liquidity-reporting/26155), the Uniswap Labs standard for reporting TVL and immediately swappable liquidity, created 2026-06-11. Its normative invariant is that `getEffectiveLiquidity` should not exceed `getReserves`, which is exactly the shape of what instruction `0x92` enforces inside the VM. URC-3's own motivating cases list, verbatim, *"deploy liquidity in external protocols"*, *"rehypothecate assets"* and *"maintain reserves outside the PoolManager"*.
+
+Both accessors report the real per token content of the position, valued at the live pool price, plus the
+vault's free float on the side it actually sits on. They used to credit `liquidity * unitsPerLiquidityE18` to
+both sides, which is right at parity and wrong everywhere else: a full range unit of liquidity is worth
+`sqrt(price)` of token1 and `1/sqrt(price)` of token0, so at a price of four the two sides differ by a factor
+of four and the old report said they were equal. Both also refuse a `PoolKey` that is not the pool backing the
+position, because the standard is written around a named pool and answering for a different one is a wrong
+answer rather than a missing one.
 
 ## Chain
 
@@ -203,7 +238,7 @@ See [FEEDBACK.md](FEEDBACK.md) for what we found while integrating.
 yarn install
 cp .env.example .env          # fill UNISWAP_API_KEY and DEPLOYER_PRIVATE_KEY
 yarn gate0                    # six checks that decide whether the project exists
-yarn test                     # 19 tests, no network needed
+yarn test                     # 48 tests, no network needed
 forge script contracts/script/Deploy.s.sol --rpc-url sepolia --broadcast --verify
 yarn setup                    # pool, position, vault custody, all through the LP API
 yarn aqua                     # opens the strategy the book quotes
@@ -211,6 +246,13 @@ yarn fill                     # one fill on Sepolia, end to end
 yarn inventory                # what those fills did to the maker's inventory
 yarn rebalance                # trade the inventory home, between fills
 ```
+
+`@1inch/swap-vm` is pinned to the exact commit the lockfile resolves,
+`b5e0e4d72242ec44ac636d5e6ce0c5686619b00d`, rather than to `#main`, because it is the one dependency whose
+behaviour this project modifies and a moving target there is a moving target under the instruction table.
+OpenZeppelin and forge-std are deliberately held at `5.4.0` and `v1.11.0`, which are the versions swap-vm
+itself pins: upgrading either past the sponsor would compile our contracts against one tree and their
+instructions against another.
 
 `yarn setup` is resumable and reads `deployments/sepolia.json` as its state: a position already recorded
 there is reused rather than duplicated, and `--recreate` opens a second one. `yarn aqua` picks a fresh salt
@@ -242,14 +284,18 @@ for a program Aqua has never seen, ships that one from the vault with the same b
 parameters, and leaves the taker approved. Nothing else moves: same pool, same position, same vault, same
 router, one byte of difference in a no-op instruction.
 
-| Latest fill on Sepolia | [`0x2d06c096…`](https://sepolia.etherscan.io/tx/0x2d06c09613389cdd2260213d302a3ae3a2875c71e986b310595a3592adaafb55) |
+| Latest fill on Sepolia | [`0xfa8e60eb…`](https://sepolia.etherscan.io/tx/0xfa8e60eb930b9617455ceeaf36b23bb788532738d1944358c5d5ee59d7a8a704) |
 |---|---|
 | Program | `0x92` unwind, `0x51` concentrate bounded by the position, `0x02` salt |
-| Swapped | 1,000 bBRAVO in, 879.312663104099977232 bALPHA out |
-| Unwind | 1% of the position, released 921.42 bALPHA against 879.31 owed, surplus kept as float |
-| Redeposit | liquidity back from 101,448.88 to 101,495.78 in the same transaction |
-| Gas | 343,942 |
-| Taker | `0xF29bCE83AF15acC7AdaaeaC34A5BE9165C52b4d0`, a wallet that funded itself through the public `mint` |
+| Swapped | 1,000 bBRAVO in, 912.676854023977327256 bALPHA out |
+| Unwind | 2% of the position, released 1,806.65 bALPHA and 2,234.54 bBRAVO against 912.68 owed, all of it into the vault, which is what guard 5 now checks |
+| Redeposit | liquidity back from 98,452.54 to 99,446.80 in the same transaction |
+| Gas | 340,599, against 343,942 before the guard, because the fill sizes its own unwind |
+| Taker | the deployer on this run; the dashboard fills from whatever wallet is connected, and the guards do not care which |
+
+That fill is the first one to run against all five guards, and it costs no more than the four did. The two
+extra reads the conservation guard makes, `getPoolAndPositionInfo` and `getSlot0`, are worth about 15,000 gas
+on a fill that already carries two PositionManager calls.
 
 That taker is not the deployer and holds nothing but what it minted itself, which is the point of the two
 buttons on the dashboard: the fill is signed by whoever is connected, and the maker's guards do not care who
@@ -325,10 +371,11 @@ A solver is off-chain by nature in every RFQ system, including 1inch's own Fusio
 resolvers compete off chain, and the chain only ever sees the settlement. So the question is never whether a
 solver runs off chain, it is whether the maker has to trust it. Here it does not. The taker is whoever presses
 the button, the order and the vault are immutable, and everything the taker supplies per fill is judged on
-chain by `BebecitaVault`'s four guards: the output balance must grow by at least the amount the VM computed,
-the input side may not shrink, one fill may not unwind more than `maxUnwindPct` of the position, and a
-redeposit may only grow it. An adversarial taker therefore chooses how the position is unwound and never
-whether the maker ends up short. That is why deleting the backend cost this project nothing: there was no
+chain by `BebecitaVault`'s five guards: the output balance must grow by at least the amount the VM computed,
+the input side may not shrink, one fill may not unwind more than `maxUnwindPct` of the position, a redeposit
+may only grow it, and the value the unwind released has to land in the vault rather than anywhere the payload
+chose. An adversarial taker therefore chooses how the position is unwound and never whether the maker ends up
+short. That is why deleting the backend cost this project nothing: there was no
 trust in it to remove. What kept the fill in a process was one detail, `TakerTraitsLib.build` being `internal
 pure` Solidity, and porting it removed the process.
 
@@ -363,7 +410,9 @@ contracts/src/opcodes/        BebecitaOpcodes, the Aqua table plus 0x92 and thre
 contracts/src/routers/        BebecitaRouter, the redeployed SwapVM pointing at the official Aqua
 contracts/src/vault/          BebecitaVault, the maker: position custody, hooks, URC-3 reporting
 contracts/src/interfaces/     IHookStats (URC-3)
-contracts/test/               19 tests: the negative moment, the partial fills, the four guards, the traits port
+contracts/src/libraries/      LiquidityAmounts and TickMath, liquidity to per token amounts
+contracts/test/               48 tests: the negative moment, the partial fills, the five guards, the
+                              diversion attack, the redeposit, the rewired controls, the traits port
 contracts/script/             Sepolia deployment, and the Solidity reference for the taker traits
 solver/src/                   the fill plan and the taker traits, shared with the browser, plus the LP API
                               client, gate zero, setup and the Aqua strategy
