@@ -603,6 +603,7 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
     if (!token0 || !token1) return { ok: false, reason: 'the pool key has not been read yet' }
     if (!snapshot.vault.unitsPerLiquidityE18.ok) return { ok: false, reason: snapshot.vault.unitsPerLiquidityE18.reason }
     if (!snapshot.vault.maxUnwindPct.ok) return { ok: false, reason: snapshot.vault.maxUnwindPct.reason }
+    if (!snapshot.vault.haircutBps.ok) return { ok: false, reason: snapshot.vault.haircutBps.reason }
 
     return {
       ok: true,
@@ -621,6 +622,7 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
         token1,
         unitsPerLiquidityE18: snapshot.vault.unitsPerLiquidityE18.value,
         maxUnwindPct: snapshot.vault.maxUnwindPct.value,
+        haircutBps: snapshot.vault.haircutBps.value,
         chainId,
         dry: dryRun,
       },
