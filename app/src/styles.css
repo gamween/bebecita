@@ -1338,8 +1338,19 @@ td.addr {
   gap: 9px;
 }
 
+/* The fill is step 3 of three, so it carries the badge mint and approve carry and lays it out the same way. */
 .trade-execution .btn.primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
   min-width: 124px;
+}
+
+/* On the ink fill the faint border and faint ink of the other two badges vanish, so this one follows the label. */
+.btn.primary .button-step {
+  border-color: currentColor;
+  color: currentColor;
 }
 
 .trade-setup {
@@ -3057,11 +3068,74 @@ th {
   font-size: 12px;
 }
 
+/*
+ * The disclosure that carries the Uniswap payloads of one fill.
+ *
+ * Same affordance as the page level one, so `.summary-action` is reused whole and only the two open state
+ * rules have to be restated for this selector. The chrome is lighter because this one lives inside a panel:
+ * one hairline instead of two, and the panel's own gutter instead of the page's rhythm.
+ */
+.result-disclosure {
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.result-disclosure summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0 0;
+  font-size: 12.5px;
+  color: var(--ink-dim);
+  cursor: pointer;
+  list-style: none;
+}
+
+.result-disclosure summary::-webkit-details-marker {
+  display: none;
+}
+
+.result-disclosure[open] .summary-action::before {
+  content: "Hide ";
+}
+
+.result-disclosure[open] .summary-action::after {
+  content: " −";
+}
+
+.result-disclosure .kv {
+  margin-top: 12px;
+}
+
+.result-disclosure .kv dd .unit {
+  display: block;
+  margin-left: 0;
+  font-family: var(--sans);
+}
+
+/* The whole payload, scrollable, so it can be copied without the panel growing a page tall. */
+.calldata {
+  display: block;
+  max-height: 84px;
+  margin-top: 4px;
+  overflow: auto;
+  font-size: 11px;
+  color: var(--ink-faint);
+  overflow-wrap: anywhere;
+}
+
 .claim-ready {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 12px;
+  margin-top: 14px;
+}
+
+.claim-ready .faint {
+  flex: 1 1 26ch;
+  font-size: 11.5px;
 }
 
 .footer {

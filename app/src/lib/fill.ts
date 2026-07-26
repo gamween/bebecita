@@ -3,6 +3,8 @@ import type { Address, Hex, WalletClient } from 'viem'
 import { planFill, type ChainReader, type FillPlan, type LiquidityApi } from '@solver/fillPlan'
 import { erc20Abi, positionManagerAbi, routerAbi, vaultAbi } from './abi'
 import { CHAIN, publicClient } from './client'
+import { reason } from './format'
+import { readFillReceipt, type FillReceipt } from './receipt'
 import { decrease, increase } from './uniswap'
 
 /**
@@ -26,13 +28,20 @@ export interface FillRequest {
   isAToB: boolean
   /** The connected wallet. It signs the swap and it is the address the router pulls the input from. */
   taker: Address
-  /** The viem client wagmi built over the connected connector. Only `swap()` goes through it. */
-  wallet: WalletClient
+  /**
+   * The viem client wagmi built over the connected connector. Only `swap()` goes through it, so a dry run
+   * neither needs one nor is given one: it simulates on `publicClient`, which is pinned to Sepolia.
+   */
+  wallet: WalletClient | null
   order: { maker: Address; traits: bigint; data: Hex }
   orderHash?: Hex
   router: Address
   vault: Address
   positionManager: Address
+  /** Where the two `ModifyLiquidity` events land. Only the receipt read-back needs it. */
+  poolManager?: Address | null
+  /** Narrows the read-back to this pool, for a PoolManager that carries more than one. */
+  poolId?: Hex | null
   tokenId: bigint
   token0: Address
   token1: Address
@@ -66,6 +75,13 @@ export interface FillResult {
   blockNumber: bigint | null
   gasUsed: bigint | null
   orderHash: Hex
+  /**
+   * What the taker paid and was paid.
+   *
+   * On a dry run these are the simulation's own figures, because nothing settled. On a real fill they are
+   * overwritten by the `Swapped` event in the receipt, so the two numbers on screen are the ones the chain
+   * recorded rather than the ones a simulation predicted one block earlier.
+   */
   amountIn: bigint
   amountOut: bigint
   /** The two payloads the Uniswap API built for this fill, exactly as placed in the taker traits slices. */
@@ -78,6 +94,11 @@ export interface FillResult {
   taker: Address
   tokenIn: Address
   tokenOut: Address
+  /**
+   * The fill decoded out of its own logs. Null on a dry run, and null on a real fill whose read-back failed,
+   * which is a state the panel says out loud rather than filling in from the request.
+   */
+  receipt: FillReceipt | null
   dry: boolean
   steps: FillStep[]
   log: string[]
@@ -240,11 +261,13 @@ export async function approveRouter(params: {
 }
 
 /**
- * Quote, size, fetch, encode, sign, broadcast. The whole fill, in the tab.
+ * Quote, size, fetch, encode, sign, broadcast, read back. The whole fill, in the tab.
  *
  * The plan is built first and is read only, so nothing is signed until the two Uniswap payloads exist and the
  * taker traits have been encoded. The swap is then simulated against live state, which is what turns a VM
- * revert into a message before a nonce is spent, and only then handed to the wallet.
+ * revert into a message before a nonce is spent, and only then handed to the wallet. What comes back out is
+ * decoded from the receipt's own logs by `receipt.ts`, so the figures shown are the chain's and not this
+ * module's.
  */
 export async function runFill(request: FillRequest): Promise<FillResult> {
   const steps: FillStep[] = []
@@ -284,17 +307,20 @@ export async function runFill(request: FillRequest): Promise<FillResult> {
     token: plan.tokenIn,
     router: request.router,
   })
+  // The page disarms the fill on both of these before a request goes out, so reaching here means the balance
+  // moved between the read and the press. The buttons are named as the sidebar labels them, step included.
   if (balance < plan.quotedIn) {
     throw new TakerNotFundedError(
       `the connected wallet holds ${balance} of the input token and this fill needs ${plan.quotedIn}. Press ` +
-        'Mint test tokens, the token is a TestERC20 whose mint is public.',
+        'Mint, step 1 in the wallet panel, the token is a TestERC20 whose mint is public.',
       { token: plan.tokenIn, amount: plan.quotedIn, balance, allowance },
     )
   }
   if (allowance < plan.quotedIn) {
     throw new TakerNotFundedError(
       `the router is approved for ${allowance} of the input token and this fill needs ${plan.quotedIn}. Press ` +
-        'Approve the router. The allowance goes to the router because it pushes into Aqua on your behalf.',
+        'Approve the router, step 2 in the wallet panel. The allowance goes to the router because it pushes ' +
+        'into Aqua on your behalf.',
       { token: plan.tokenIn, amount: plan.quotedIn, balance, allowance },
     )
   }
@@ -313,7 +339,7 @@ export async function runFill(request: FillRequest): Promise<FillResult> {
   const [simulatedIn, simulatedOut, simulatedHash] = result
   emit({ type: 'log', line: `simulated  ${simulatedIn} in, ${simulatedOut} out, orderHash ${simulatedHash}` })
 
-  const base: Omit<FillResult, 'transactionHash' | 'blockNumber' | 'gasUsed' | 'dry'> = {
+  const base: Omit<FillResult, 'transactionHash' | 'blockNumber' | 'gasUsed' | 'receipt' | 'dry'> = {
     orderHash: plan.orderHash,
     amountIn: simulatedIn,
     amountOut: simulatedOut,
@@ -328,7 +354,11 @@ export async function runFill(request: FillRequest): Promise<FillResult> {
     log,
   }
 
-  if (request.dry) return { ...base, transactionHash: null, blockNumber: null, gasUsed: null, dry: true }
+  if (request.dry) {
+    return { ...base, transactionHash: null, blockNumber: null, gasUsed: null, receipt: null, dry: true }
+  }
+
+  if (!request.wallet) throw new Error('the wallet is not ready, so there is nothing to sign swap() with')
 
   const transactionHash = await request.wallet.writeContract({
     ...swapArgs,
@@ -345,11 +375,34 @@ export async function runFill(request: FillRequest): Promise<FillResult> {
   }
   emit({ type: 'log', line: `status  success, block ${receipt.blockNumber}, gas ${receipt.gasUsed}` })
 
+  // The amounts in `base` are the simulation's, taken one block before this one, so they are a prediction. The
+  // logs are where the settled figures live, and the same read-back also carries the two PositionManager calls
+  // and the position's liquidity around each. A read-back that fails does not fail the fill: the swap is on
+  // chain either way, and the panel says the decoding is missing instead of reprinting the request.
+  const decoded = await readFillReceipt(transactionHash, {
+    router: request.router,
+    vault: request.vault,
+    poolManager: request.poolManager ?? null,
+    positionManager: request.positionManager,
+    poolId: request.poolId ?? null,
+  }).catch((error) => {
+    emit({ type: 'log', line: `receipt not decoded  ${reason(error)}` })
+    return null
+  })
+
+  const settled = decoded?.swapped.ok ? decoded.swapped.value : null
+  if (settled) {
+    emit({ type: 'log', line: `settled  ${settled.amountIn} in, ${settled.amountOut} out, from the Swapped event` })
+  }
+
   return {
     ...base,
+    amountIn: settled ? settled.amountIn : base.amountIn,
+    amountOut: settled ? settled.amountOut : base.amountOut,
     transactionHash,
     blockNumber: receipt.blockNumber,
     gasUsed: receipt.gasUsed,
+    receipt: decoded,
     dry: false,
   }
 }
