@@ -295,11 +295,15 @@ maker parameter it moves, and [docs/DECISIONS.md](docs/DECISIONS.md) for why thi
 cd app && yarn install && yarn dev     # http://localhost:5173, and nothing else
 ```
 
-A landing page and a dashboard, Vite plus React plus TypeScript plus viem, no wallet kit. The dashboard reads
-the position, the vault and the Aqua balances live from Sepolia, calls `quote()` through a staticcall, calls
-the Uniswap LP API for real, and shows every API request and response with its response headers. Addresses are
-read at runtime from `deployments/sepolia.json` and `solver/src/config.ts`, never copied. See
-[app/README.md](app/README.md).
+A landing page and a dashboard, Vite plus React plus TypeScript plus viem, with wagmi over it for the wallet.
+The dashboard reads the position, the vault and the Aqua balances live from Sepolia, calls `quote()` through a
+staticcall, calls the Uniswap LP API for real, and shows every API request and response with its response
+headers. Addresses are read at runtime from `deployments/sepolia.json` and `solver/src/config.ts`, never
+copied. See [app/README.md](app/README.md).
+
+The connect button offers the injected wallets the browser announces, Coinbase Wallet, and WalletConnect when
+`VITE_WALLETCONNECT_PROJECT_ID` is set. It disconnects, it follows an account or chain switch made inside the
+wallet without a reload, and it offers to add Ethereum Sepolia to a wallet that does not know it.
 
 **Run a fill** does the whole thing in the tab, signed by the connected wallet. It quotes, sizes the unwind,
 calls `/lp/decrease` and `/lp/increase`, encodes the taker traits and sends `swap()`. The transaction is then

@@ -204,8 +204,8 @@ In the tab, signed by the connected wallet. There is no backend, and the shape o
 came back and round the percentage up, `POST /lp/decrease` and `POST /lp/increase`, encode the taker traits.
 It touches the chain and the API through two injected interfaces and therefore does not know where it is
 running. `yarn fill` gives it a viem HTTP transport and a private key, the dashboard gives it the same
-transport and `window.ethereum`, and neither owns a second copy of the arithmetic. The dev server proxies the
-Uniswap key and JSON-RPC and runs none of this project's logic.
+transport and the wallet client wagmi built over the connected connector, and neither owns a second copy of
+the arithmetic. The dev server proxies the Uniswap key and JSON-RPC and runs none of this project's logic.
 
 What used to force a process was one detail. `TakerTraitsLib.build` is `internal pure` Solidity, so it can
 only run inside a contract, and `forge` is not available in a browser. `solver/src/takerTraits.ts` ports it:
