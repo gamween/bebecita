@@ -53,7 +53,9 @@ function Row({ entry }: { entry: NetEntry }) {
           <div className="upstream">
             {entry.method} {entry.upstream ?? entry.url}
             {entry.apiKeyAttached === null ? null : entry.apiKeyAttached ? (
-              <span className="faint"> , x-api-key attached by the dev server</span>
+              // Never "by the dev server": the same proxy is a Vite middleware locally and a Vercel function in
+              // production, and on the deployed site the old wording read as a local hack.
+              <span className="faint"> , x-api-key attached by the proxy, never in the bundle</span>
             ) : (
               <span className="unavailable"> , no x-api-key was attached, UNISWAP_API_KEY is empty in .env</span>
             )}
@@ -91,13 +93,24 @@ export function NetworkPanel() {
 
   return (
     <Panel
-      title="Uniswap API traffic"
+      // The disclosure this sits inside is already titled "Uniswap API traffic", so the panel names the host it
+      // talked to instead of repeating the concept.
+      title={<span className="mono">{LP_HOST.replace('https://', '')}</span>}
       meta={
         <div className="row">
-          <span className="faint mono">{LP_HOST.replace('https://', '')}</span>
+          {/*
+           * Three states, not two. The old code showed "no call yet" whenever the header was absent, so a 200
+           * from an endpoint that does not send `x-ratelimit-remaining` put the words "no call yet" directly
+           * above the call it had just made. On the panel whose entire job is to be believed, that is the worst
+           * possible copy.
+           */}
           {remaining ? (
             <span className="chip" title="x-ratelimit-remaining on the most recent response that carried it">
               <span className="led" /> {remaining} requests left
+            </span>
+          ) : entries.length ? (
+            <span className="chip" title="the calls below answered without an x-ratelimit-remaining header">
+              <span className="led" /> quota not reported
             </span>
           ) : (
             <span className="chip warn">
@@ -118,8 +131,8 @@ export function NetworkPanel() {
         </div>
       ) : (
         <div className="empty">
-          Nothing yet. Refresh the state, ask for the unwind calldata or claim the fees, and every request and
-          response shows up here with its rate limit header.
+          Nothing yet. Press Refresh state or Claim LP fees, neither of which needs a wallet, and the request
+          body, the status, the response and every header the gateway sent show up here.
         </div>
       )}
     </Panel>

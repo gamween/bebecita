@@ -47,9 +47,10 @@ export interface ApiCall<T> {
   upstream: string | null
 }
 
-async function post<T>(label: string, path: string, body: unknown): Promise<ApiCall<T>> {
+async function post<T>(path: string, body: unknown): Promise<ApiCall<T>> {
   const url = `${PROXY_BASE}${path}`
-  const id = netlog.start(label, 'POST', url, body)
+  // The network panel prints the verb itself, so the label is the endpoint alone.
+  const id = netlog.start(path, 'POST', url, body)
 
   let response: Response
   try {
@@ -110,7 +111,7 @@ export interface PoolParams {
 
 /** Pool state and current tick. Same call the solver uses to size a clip. */
 export function poolInfo(params: PoolParams) {
-  return post<Record<string, unknown>>('POST /lp/pool_info', '/lp/pool_info', {
+  return post<Record<string, unknown>>('/lp/pool_info', {
     chainId: params.chainId,
     protocol: params.protocol ?? 'V4',
     poolParameters: {
@@ -140,7 +141,7 @@ export function decrease(params: {
   slippageTolerance?: number
 }) {
   const percent = Math.min(100, Math.max(1, Math.ceil(params.percent)))
-  return post<Record<string, unknown>>('POST /lp/decrease', '/lp/decrease', {
+  return post<Record<string, unknown>>('/lp/decrease', {
     walletAddress: params.walletAddress,
     chainId: params.chainId,
     protocol: params.protocol ?? 'V4',
@@ -178,7 +179,7 @@ export function increase(params: {
   independentToken: string
   independentAmount: string
 }) {
-  return post<Record<string, unknown>>('POST /lp/increase', '/lp/increase', {
+  return post<Record<string, unknown>>('/lp/increase', {
     walletAddress: params.walletAddress,
     chainId: params.chainId,
     protocol: params.protocol ?? 'V4',
@@ -210,7 +211,7 @@ export function claimFees(params: {
   walletAddress: string
   tokenId: string
 }) {
-  return post<Record<string, unknown>>('POST /lp/claim_fees', '/lp/claim_fees', {
+  return post<Record<string, unknown>>('/lp/claim_fees', {
     walletAddress: params.walletAddress,
     chainId: params.chainId,
     protocol: params.protocol ?? 'V4',

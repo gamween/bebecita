@@ -144,7 +144,86 @@ neighbouring endpoints rather than merely misspelled.
 
 Suggestion: accept `nftTokenId` on `/lp/claim_fees` as an alias, and report unknown keys by name.
 
-### The AquaSwapVMRouter deployed on Sepolia is not the contract the published source builds
+### 11. `/lp/pool_info` is the only LP endpoint that reports no rate limit, and it is the one a read-only client leans on
+
+Every `/lp/*` endpoint we call answers with `x-ratelimit-limit` and `x-ratelimit-remaining`, except
+`/lp/pool_info`, which returns neither. Same host, same key, same session, five endpoints:
+
+```
+$ for ep in pool_info claim_fees decrease increase check_approval; do
+    curl -sD - -o /dev/null -X POST https://liquidity.api.uniswap.org/lp/$ep \
+      -H "x-api-key: $UNISWAP_API_KEY" -H 'content-type: application/json' -d "$BODY"
+  done
+
+/lp/pool_info        200   NO x-ratelimit HEADER
+/lp/claim_fees       200   x-ratelimit-limit: 6  x-ratelimit-remaining: 5
+/lp/decrease         200   x-ratelimit-limit: 6  x-ratelimit-remaining: 5
+/lp/increase         200   x-ratelimit-limit: 6  x-ratelimit-remaining: 5
+/lp/check_approval   400   x-ratelimit-limit: 6  x-ratelimit-remaining: 5
+```
+
+Note the 400 still reports. So the header is not tied to success, and its absence on `/lp/pool_info` is not a
+property of that response either: it is the endpoint.
+
+Impact: with a limit of 6, a client has to budget, and the only honest way to budget is to read the header the
+gateway sends. `/lp/pool_info` is a pure read that needs no wallet and no signature, so it is exactly what a
+dashboard or an indexer polls, and it is the call whose cost cannot be observed. We hit this building a panel
+that displays the quota next to every request: on the one endpoint any visitor can trigger, the panel has
+nothing to display, which reads to a user as a broken panel rather than as a missing header. Consuming a budget
+invisibly is worse than a low budget.
+
+Suggestion: send `x-ratelimit-limit` and `x-ratelimit-remaining` on `/lp/pool_info` as well. If the omission is
+deliberate because the endpoint is metered differently or not at all, say so in the OpenAPI document, because
+from the client side an absent header and an unmetered endpoint are indistinguishable.
+
+## 1inch
+
+### 12. The custom SwapVM example in `1inch/sdks` no longer compiles against `swap-vm@main`
+
+`contracts/src/swap-vm/TestCustomSwapVM.sol` uses `_instructions()`, `_opcodes()` and `_notInstruction` with
+a static function pointer array. `swap-vm` moved to direct dispatch via `_runOpcode(Context, uint256, bytes)`
+in PR #140, merged 2026-07-03.
+
+Impact: an integrator following the official example does not compile, and the error points at the example
+rather than at the change.
+
+Suggestion: update the sample, or copy the shape of `AquaOpcodesDebug.sol`, which is the pattern that works.
+
+### 13. Three `Controls` instructions are unreachable from the Aqua opcode table
+
+`Stop` (0x00), `Revert` (0x01) and `JumpIfDirection` (0x30) exist in `Controls.sol`, are dispatched by the
+full `Opcodes` table, and are absent from `AquaOpcodes`. An Aqua program using any of them reverts with
+`UnknownOpcode`.
+
+Impact: an Aqua program cannot halt early, so conditional strategies are not expressible on the Aqua router.
+
+Reproduce: build a program containing opcode `0x00` and run it through `AquaSwapVMRouter`.
+
+Suggestion: three `else if` branches in `AquaOpcodes._runOpcode`. Our `BebecitaOpcodes` carries them.
+
+### 14. The canonical instruction ordering makes protocol fees unusable for a capital efficient maker
+
+The SwapVM whitepaper gives the canonical ordering as `aquaProtocolFee`, then the swap instruction, then
+`flatFee`. But `_aquaProtocolFeeAmountInXD` pulls `tokenIn` from the maker during `runLoop`, before the taker
+has paid, and its own NatSpec states the maker must already hold sufficient balance or the swap reverts.
+
+A maker whose inventory is deployed rather than idle, which is the state the Aqua whitepaper describes as
+efficient, therefore cannot pay a protocol fee at all. The only usable fee instruction for such a maker is
+`FlatFeeAmountIn`, which is purely arithmetic.
+
+Suggestion: a protocol fee variant that settles after `_transferIn`, or that draws on `amountNetPulled`.
+
+### 15. No testnet deployment is documented, although one exists
+
+The Aqua README lists 13 mainnet deployments and no testnet. The official Aqua is in fact deployed on
+Ethereum Sepolia at `0x499943E74FB0cE105688beeE8Ef2ABec5D936d31`, the canonical address, with bytecode
+identical to Base, and the official `AquaSwapVMRouter` is at `0x8fdd04dbf6111437b44bbca99c28882434e0958f`.
+
+Impact: teams assume a mainnet fork is the only option and inherit every problem that comes with it.
+
+Suggestion: add a testnet row to the deployments table.
+
+### 16. The AquaSwapVMRouter deployed on Sepolia is not the contract the published source builds
 
 `0x8fdd04dbf6111437b44bbca99c28882434e0958f` on Ethereum Sepolia answers `hash(order)` correctly, and Aqua
 registers a strategy shipped under it correctly, so it is recognisably an `AquaSwapVMRouter`. But `quote()`
@@ -170,50 +249,3 @@ through your router as a control experiment.
 
 Suggestion: publish the commit each deployment was built from, or redeploy the testnet router from `main`. A
 deployments table with a commit column would remove the whole class of problem.
-
-## 1inch
-
-### 11. The custom SwapVM example in `1inch/sdks` no longer compiles against `swap-vm@main`
-
-`contracts/src/swap-vm/TestCustomSwapVM.sol` uses `_instructions()`, `_opcodes()` and `_notInstruction` with
-a static function pointer array. `swap-vm` moved to direct dispatch via `_runOpcode(Context, uint256, bytes)`
-in PR #140, merged 2026-07-03.
-
-Impact: an integrator following the official example does not compile, and the error points at the example
-rather than at the change.
-
-Suggestion: update the sample, or copy the shape of `AquaOpcodesDebug.sol`, which is the pattern that works.
-
-### 12. Three `Controls` instructions are unreachable from the Aqua opcode table
-
-`Stop` (0x00), `Revert` (0x01) and `JumpIfDirection` (0x30) exist in `Controls.sol`, are dispatched by the
-full `Opcodes` table, and are absent from `AquaOpcodes`. An Aqua program using any of them reverts with
-`UnknownOpcode`.
-
-Impact: an Aqua program cannot halt early, so conditional strategies are not expressible on the Aqua router.
-
-Reproduce: build a program containing opcode `0x00` and run it through `AquaSwapVMRouter`.
-
-Suggestion: three `else if` branches in `AquaOpcodes._runOpcode`. Our `BebecitaOpcodes` carries them.
-
-### 13. The canonical instruction ordering makes protocol fees unusable for a capital efficient maker
-
-The SwapVM whitepaper gives the canonical ordering as `aquaProtocolFee`, then the swap instruction, then
-`flatFee`. But `_aquaProtocolFeeAmountInXD` pulls `tokenIn` from the maker during `runLoop`, before the taker
-has paid, and its own NatSpec states the maker must already hold sufficient balance or the swap reverts.
-
-A maker whose inventory is deployed rather than idle, which is the state the Aqua whitepaper describes as
-efficient, therefore cannot pay a protocol fee at all. The only usable fee instruction for such a maker is
-`FlatFeeAmountIn`, which is purely arithmetic.
-
-Suggestion: a protocol fee variant that settles after `_transferIn`, or that draws on `amountNetPulled`.
-
-### 14. No testnet deployment is documented, although one exists
-
-The Aqua README lists 13 mainnet deployments and no testnet. The official Aqua is in fact deployed on
-Ethereum Sepolia at `0x499943E74FB0cE105688beeE8Ef2ABec5D936d31`, the canonical address, with bytecode
-identical to Base, and the official `AquaSwapVMRouter` is at `0x8fdd04dbf6111437b44bbca99c28882434e0958f`.
-
-Impact: teams assume a mainnet fork is the only option and inherit every problem that comes with it.
-
-Suggestion: add a testnet row to the deployments table.
