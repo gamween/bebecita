@@ -1,7 +1,13 @@
 # Implementation plan
 
-Status at the time of writing: the contracts are deployed and verified on Ethereum Sepolia, gate zero is
-green, 11 tests pass, six commits on `main`. What follows is everything left to build.
+This file was written before the build and is kept as the record of what was planned. It is not a status
+report. Where a task shipped differently from the plan, or did not ship at all, that is written under the task
+rather than edited out of it.
+
+Status as of **2026-07-26**: the contracts are deployed and verified on Ethereum Sepolia, gate zero is green,
+48 tests pass in three suites, 75 commits on `main` across 20 merged pull requests. Those two counts are exact
+at that date; `git rev-list --count origin/main` and `gh pr list --state merged --limit 100 --json number --jq
+'length'` re-derive them. T1, T2, T3, T4, T6, T7 and T8 shipped. T5 did not, and the reason is under T5.
 
 Every task ships on its own branch, through a pull request, reviewed before merge. No direct commits to
 `main`.
@@ -10,13 +16,13 @@ Every task ships on its own branch, through a pull request, reviewed before merg
 
 ```
 T1 pool and position  ──┐
-                        ├──> T3 fill orchestrator ──> T5 two fills in one transaction
+                        ├──> T3 fill orchestrator ──> T5 two fills in one transaction  (not built)
 T2 frontend         ────┘                        └──> T6 dashboard and SLAC
 T4 concentrate curve ───────────────────────────────┘
 T7 docs and demo ──────────────────────────────────────────────> T8 final review
 ```
 
-T1, T2 and T4 are independent and can run at the same time. T3 needs T1. T5 needs T3 and T4. T6 needs T3.
+T1, T2 and T4 are independent and can run at the same time. T3 needs T1. T5 needed T3 and T4. T6 needs T3.
 
 ---
 
@@ -81,14 +87,33 @@ becomes the range of the position funding it.
 Acceptance: a fill larger than the reachable collateral returns an exact partial rather than reverting, proven
 by a test.
 
-## T5. Two fills in one transaction, `feat/two-fills`
+## T5. Two fills in one transaction, `feat/two-fills`. Not built.
 
-A taker contract that calls `swap()` twice, on two strategy hashes of the same maker, both backed by the same
-position. Legal because the reentrancy guard is keyed by order hash rather than global, and the second
-`runLoop` reads a balance already reduced by the first pull.
+Planned: a taker contract calling `swap()` twice, on two strategy hashes of the same maker, both backed by the
+same position. Legal because the reentrancy guard is keyed by order hash rather than global, and the second
+`runLoop` would read a balance already reduced by the first pull.
 
-Acceptance: one transaction hash on Sepolia showing two `Swapped` events and one position touched. Never
-three, the setup cost is where demos die.
+It was not built, and nothing partial was left behind. There is no taker contract in `contracts/src/`, and no
+transaction on the router carries two `Swapped` events. Checked rather than remembered: every `Swapped` the
+router has ever emitted, seventeen of them, sits in its own transaction.
+
+```bash
+cast logs --from-block 0 --to-block latest \
+  --address 0x354422f6e4e3476b540E306A6DdFb4638d9EA5c3 \
+  0x54bc5c027d15d7aa8ae083f994ab4411d2f223291672ecd3a344f3d92dcaf8b2 \
+  --rpc-url <an archive Sepolia endpoint>
+```
+
+Why it was dropped, plainly. It was the best ten seconds available on stage and it was ranked below the work
+that closed a real security hole. The audit that produced guard five landed in the same window: the first four
+guards let a taker unwind the whole per fill cap, hand the vault exactly what the fill owed and keep the rest
+of both tokens, and repeating that with dust sized fills drained the position with every guard green. Building
+a second taker to make the demo louder while that was open would have been the wrong trade. A judge who asks
+what got cut should be told this, because the answer is the better story.
+
+The compounding reason: T5 is theatre with no new mechanism in it. The reentrancy guard being keyed by order
+hash is the sponsor's property, not ours, and demonstrating it would have proved nothing about the instruction
+this project exists for.
 
 ## T6. Dashboard and SLAC, `feat/dashboard`
 
@@ -105,8 +130,11 @@ Acceptance: the numbers move on their own while nobody touches anything.
 ## T7. Docs and demo, `docs/complete`
 
 - `docs/ARCHITECTURE.md`: the settlement window, the five guards, the trust model.
-- `docs/DEMO.md`: the three minute script, screen by screen, including the split screen negative moment
-  against the official 1inch router already deployed at `0x8fdd04db...`.
+- `docs/DEMO.md`: the three minute script, screen by screen, including the split screen negative moment.
+  Planned against the official 1inch router already deployed at `0x8fdd04db...`. That deployment does not
+  execute orders built against current `swap-vm`, which became `FEEDBACK.md`'s strongest 1inch finding, so the
+  negative moment shipped on our own router instead through `yarn negative-moment`. Same curve, same bounds,
+  one instruction of difference, which is the more rigorous experiment anyway.
 - `docs/DECISIONS.md`: what was decided and why, including what was deliberately not built.
 - One diagram in the README: five boxes, with `SwapVM.sol:310-314` and `:321` written on the arrow between
   the middle two.
