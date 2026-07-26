@@ -1,7 +1,7 @@
 # app
 
-The landing page and the dashboard. Vite, React, TypeScript, viem. No wallet kit, no component library, no
-chart library: the wallet is `window.ethereum` driven through viem, and the styling is one CSS file.
+The landing page and the dashboard. Vite, React, TypeScript, viem, wagmi. No component library, no chart
+library, no animation library: the styling is one CSS file and the wallet is wagmi over viem clients.
 
 ```bash
 cd app
@@ -10,12 +10,53 @@ yarn dev            # http://localhost:5173
 ```
 
 `yarn build` type checks and builds into `app/dist`. `yarn preview` serves that build with the same proxy as
-the dev server.
+the dev server. Run both from inside `app`: yarn 3.2.3 applies `--cwd` twice and then looks for `app/app`.
+
+## The wallet
+
+wagmi owns the connection, the account, the chain and the reconnect. viem stays underneath, because the rest
+of this codebase is viem: every client wagmi hands back is a viem client, and the read transport is the same
+`fallback` over the same endpoints the dashboard uses, declared once in `src/lib/client.ts`.
+
+Three connectors, and the set is decided at load time rather than guessed at:
+
+| Connector | Condition | Why |
+|---|---|---|
+| injected | always, plus one per extension that announces itself over EIP-6963 | an extension keeps working, and the chooser can say Rabby or MetaMask instead of "browser wallet" |
+| Coinbase Wallet | always | one dependency, no configuration, and a judge with no extension installed still has a way in |
+| WalletConnect | only when `VITE_WALLETCONNECT_PROJECT_ID` is set | a phone wallet can scan a code and take a fill |
+
+The generic injected entry is dropped from the chooser when at least one extension announced itself, because
+both would be offered and both would do the same thing. When none does, it is kept, because it is the only
+entry that can reach an extension which does not announce itself.
+
+Without the project id, WalletConnect is absent rather than broken. The chooser says so in one line, and
+there is no button that opens a modal and then fails.
+
+What the button does:
+
+- one connector available, it connects. Several, it opens a chooser naming each one;
+- connected, it shows the address truncated and the connector's name, and opens a panel with the full address,
+  a copy action, an Etherscan link and a disconnect;
+- an account switch or a chain switch made inside the wallet lands on the page through wagmi's own hooks, with
+  no reload;
+- on the wrong chain, the button says which chain and offers the switch. A wallet that has never heard of
+  Sepolia gets `wallet_addEthereumChain` with this app's own endpoints, which is wagmi's 4902 fallback;
+- on reload, wagmi reconnects to whichever connector this browser already authorised, and to none if it was
+  disconnected here.
+
+Every transaction the page sends has four states rather than a spinner: waiting on the wallet, sent, confirmed
+in a block, failed. The hash is a link from the instant it exists and stays one through a revert, because a
+reverted transaction has a receipt and that receipt is the useful thing. A revert is decoded to the custom
+error the guard raised rather than printed as a viem error object, and a rejection in the wallet says it was
+rejected and that nothing was sent.
 
 ## Where the numbers come from
 
 Nothing is mocked. A value that cannot be read yet is displayed as unavailable, with the reason, which is the
-honest state while the position is being created.
+honest state while the position is being created. A reason that covers several fields is stated once, at the
+top of the page, and those fields render as quiet placeholders under it, so a page that has not loaded reads
+as one page loading rather than as twenty five broken fields. Loading and failed are two different banners.
 
 | Panel | Source |
 |---|---|
@@ -69,7 +110,7 @@ command, `yarn dev`.
 `solver/src/fillPlan.ts`, imported from outside this package through the `@solver` alias declared in
 `vite.config.ts` and `tsconfig.json`, and it is the same module `yarn fill` runs at the repository root. This
 file supplies it with three things: chain reads through viem, the two Uniswap calls through the dev server
-proxy, and `swap()` through `window.ethereum`.
+proxy, and `swap()` through the wallet client wagmi built over whichever connector is connected.
 
 The taker traits come from `solver/src/takerTraits.ts`, a port of the sponsor's `TakerTraitsLib.build`.
 `contracts/test/TakerTraits.t.sol` proves that port byte for byte against the library itself, which is what
@@ -97,9 +138,10 @@ The connected wallet is the taker, so it needs the input token and an allowance.
   allowance to Aqua would leave the swap reverting inside the push with an ERC20 error naming neither
   contract.
 
-Both show their transaction, and the taker's balance and allowance are read back from the chain next to them.
-That is what makes the demo self serve: a judge can fill against this maker from their own wallet, and the
-maker's four on-chain guards are what make an unknown taker harmless.
+Both run through the same four state transaction reporting as the fill, and the taker's balance and allowance
+are read back from the chain next to them. That is what makes the demo self serve: a judge can fill against
+this maker from their own wallet, and the maker's four on-chain guards are what make an unknown taker
+harmless.
 
 ## SLAC
 
@@ -133,12 +175,18 @@ frontend and the solver share one file. Only `VITE_` prefixed variables reach th
 - `SEPOLIA_RPC_URL`, proxied at `/api/rpc` so a private endpoint stays out of the bundle. Without it the app
   falls back to public Sepolia endpoints.
 - `VITE_SEPOLIA_RPC_URL`, an endpoint the browser may call directly.
+- `VITE_WALLETCONNECT_PROJECT_ID`, self serve and free at https://cloud.reown.com. Set it and the connect
+  chooser offers WalletConnect next to the injected and Coinbase Wallet connectors. Leave it empty and
+  WalletConnect is simply not registered, which the chooser says in one line. Nothing else changes and no
+  button breaks. The id identifies the dapp rather than a user, so it is safe in a bundle.
 
 Nothing else. There is no solver to point at.
 
 ## Polling
 
 Chain state every 5 seconds, the log scan every 60, and the taker's balance and allowance on the same tick as
-the state. `POST /lp/pool_info` is never on a timer: it goes out on **Refresh state**, at most once every 15
-seconds, because the Uniswap key allows six requests a second and a demo should not spend that on a render
-loop. The two calls a fill makes are the only other API traffic, and they go out once per press.
+the state. The block number in the top bar is wagmi watching the head on the same 5 second interval, which is
+the only timer the top bar owns. `POST /lp/pool_info` is never on a timer: it goes out on **Refresh state**,
+at most once every 15 seconds, because the Uniswap key allows six requests a second and a demo should not
+spend that on a render loop. The two calls a fill makes are the only other API traffic, and they go out once
+per press.
