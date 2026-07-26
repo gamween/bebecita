@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
+import { useBlockNumber } from 'wagmi'
 
-import { CHAIN, connectWallet, getProvider, onWalletEvent, readWallet, switchToSepolia, type WalletState } from './lib/client'
+import { WalletButton } from './components/Wallet'
+import { CHAIN } from './lib/client'
 import { loadConfig, type AppConfig } from './lib/config'
-import { reason, short } from './lib/format'
+import { ago, integer, reason } from './lib/format'
 import { Dashboard } from './pages/Dashboard'
 import { Landing } from './pages/Landing'
 
@@ -16,85 +18,53 @@ function useRoute(): string {
   return route
 }
 
-export interface Wallet {
-  state: WalletState | null
-  error: string | null
-  busy: boolean
-  connect: () => void
-  switchChain: () => void
-  hasProvider: boolean
-}
-
-function useWallet(): Wallet {
-  const [state, setState] = useState<WalletState | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-  const hasProvider = Boolean(getProvider())
-
-  const sync = useCallback(() => {
-    readWallet()
-      .then(setState)
-      .catch((cause) => setError(reason(cause)))
-  }, [])
-
+/** A clock, so "3s ago" ages on screen instead of only when something else re-renders. */
+function useNow(intervalMs = 1000): number {
+  const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
-    sync()
-    return onWalletEvent(sync)
-  }, [sync])
-
-  const connect = useCallback(() => {
-    setBusy(true)
-    setError(null)
-    connectWallet()
-      .then(setState)
-      .catch((cause) => setError(reason(cause)))
-      .finally(() => setBusy(false))
-  }, [])
-
-  const switchChain = useCallback(() => {
-    setBusy(true)
-    setError(null)
-    switchToSepolia()
-      .then(sync)
-      .catch((cause) => setError(reason(cause)))
-      .finally(() => setBusy(false))
-  }, [sync])
-
-  return { state, error, busy, connect, switchChain, hasProvider }
+    const timer = setInterval(() => setNow(Date.now()), intervalMs)
+    return () => clearInterval(timer)
+  }, [intervalMs])
+  return now
 }
 
-function WalletButton({ wallet }: { wallet: Wallet }) {
-  if (!wallet.hasProvider) {
+/** Over this, the head has stopped moving and the number on screen is no longer a live one. */
+const STALE_AFTER_MS = 20_000
+
+/**
+ * The head of the chain and how old this page's copy of it is.
+ *
+ * wagmi watches it, which on an HTTP transport is a poll on the config's own interval, so this is the one
+ * timer in the top bar and every panel below reads its own state on its own.
+ */
+function BlockChip() {
+  const { data, dataUpdatedAt, isError, error } = useBlockNumber({ watch: true })
+  const now = useNow()
+
+  if (isError || (!data && dataUpdatedAt === 0)) {
     return (
-      <span className="chip warn" title="This app talks to window.ethereum directly, with viem and no wallet kit.">
-        <span className="led" /> no injected wallet
+      <span className="chip warn" title={error ? reason(error) : 'no endpoint has answered yet'}>
+        <span className="led" /> {isError ? 'no block' : 'reading the head'}
       </span>
     )
   }
-  if (!wallet.state) {
-    return (
-      <button className="btn small" onClick={wallet.connect} disabled={wallet.busy}>
-        {wallet.busy ? 'connecting' : 'connect wallet'}
-      </button>
-    )
-  }
-  if (wallet.state.chainId !== CHAIN.id) {
-    return (
-      <button className="btn small" onClick={wallet.switchChain} disabled={wallet.busy}>
-        switch to Sepolia
-      </button>
-    )
-  }
+
+  const age = now - dataUpdatedAt
+  const stale = age > STALE_AFTER_MS
   return (
-    <span className="chip" title={wallet.state.address}>
-      <span className="led" /> {short(wallet.state.address, 6, 4)}
+    <span
+      className={stale ? 'chip warn' : 'chip'}
+      title={stale ? 'the head has not moved for a while, the endpoint may be rate limiting' : 'head of the chain'}
+    >
+      <span className="led" />
+      <span className="mono">block {data ? integer(data) : '····'}</span>
+      <span className="faint">{ago(dataUpdatedAt, now)}</span>
     </span>
   )
 }
 
 export function App() {
   const route = useRoute()
-  const wallet = useWallet()
   const [config, setConfig] = useState<AppConfig | null>(null)
   const [configError, setConfigError] = useState<string | null>(null)
 
@@ -120,11 +90,15 @@ export function App() {
             <a className={onApp ? 'active' : ''} href="#/app">
               app
             </a>
+          </nav>
+          {/* Chain, block, wallet, in that order, and nothing else. */}
+          <div className="status">
             <span className="chip" title={`chainId ${CHAIN.id}`}>
               <span className="led" /> Ethereum Sepolia
             </span>
-            <WalletButton wallet={wallet} />
-          </nav>
+            <BlockChip />
+            <WalletButton />
+          </div>
         </div>
       </header>
 
@@ -137,7 +111,7 @@ export function App() {
             </div>
           </div>
         ) : null}
-        {onApp ? <Dashboard config={config} wallet={wallet} /> : <Landing config={config} />}
+        {onApp ? <Dashboard config={config} /> : <Landing config={config} />}
       </main>
 
       <footer className="footer">
