@@ -1574,9 +1574,8 @@ td.addr {
  * in the same place. Units go under the number rather than beside it, which is what stops a long qualifier
  * from wrapping a figure onto two lines.
  *
- * The .field family below is emitted by Field in src/components/primitives.tsx, which the dashboard is in the
- * middle of remounting, so several of these selectors have no live match right now. Do not let a dead CSS
- * pass eat them.
+ * The whole .field family is emitted by Field in src/components/primitives.tsx and by nothing else, so a
+ * change here moves every number in the two maker panels at once.
  */
 .field {
   display: grid;
@@ -2066,9 +2065,9 @@ td.addr {
 /*
  * network panel -----------------------------------------------------------
  *
- * Everything from here to .pre-label styles markup that still lives in src/components, currently off screen
- * while the dashboard is being remounted around it. It looks unused to a static sweep and is not, so a dead
- * CSS pass must leave this run alone.
+ * Everything from here to .pre-label belongs to src/components/NetworkPanel.tsx, which the console mounts
+ * inside the Uniswap API traffic disclosure. Closed is the default, so none of it is on screen until a visitor
+ * opens that block.
  */
 
 .netrows {

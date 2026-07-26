@@ -12,3 +12,4 @@ deployments/*.local.json
 
 app/node_modules
 .vercel
+.claude/worktrees/

@@ -65,9 +65,12 @@ function collect(value: unknown, out: Map<string, number>, depth = 0): void {
 
 export function readinessOf(snapshot: Snapshot | null, error: string | null): Readiness {
   if (error) {
+    // Nothing is hoisted here. The failed phase leads with the error itself, and listing it again as a stated
+    // reason printed the same sentence in two banners, one under the other, plus a third that read "not read
+    // yet" on its own. Both reasons still go into the set, so the fields collapse to placeholders under it.
     return {
       phase: 'failed',
-      stated: [{ reason: error, fields: 0 }, { reason: NOT_READ_YET, fields: 0 }],
+      stated: [],
       statedSet: new Set([error, NOT_READ_YET]),
       broken: [],
     }
