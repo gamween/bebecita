@@ -59,7 +59,11 @@ async function post<T>(label: string, path: string, body: unknown): Promise<ApiC
       body: JSON.stringify(body),
     })
   } catch (error) {
-    const message = `${(error as Error).message}. The Uniswap calls go through the dev server proxy, which is what holds the API key, so they need \`yarn dev\` or \`yarn preview\` rather than a plain static server.`
+    // The request never left, so the diagnosis is about who was supposed to answer `/api/uniswap`. A browser
+    // cannot hold the API key, so something server side always attaches it: the dev server proxy locally, and
+    // the deployment's own function in production. A plain static file server is neither, and it answers this
+    // path with HTML or a 404 rather than with a payload.
+    const message = `${(error as Error).message}. The Uniswap calls go through /api/uniswap, which is what attaches the API key, so they need \`yarn dev\` or \`yarn preview\` locally, or a deployment that serves that path. A plain static file server cannot answer it.`
     netlog.finish(id, { error: message })
     throw new Error(message)
   }
