@@ -28,6 +28,8 @@ import { BebecitaVault } from "../src/vault/BebecitaVault.sol";
 contract DeployVault is Script {
     address internal constant AQUA = 0x499943E74FB0cE105688beeE8Ef2ABec5D936d31;
     address internal constant POSITION_MANAGER = 0x429ba70129df741B2Ca2a85BC3A2a3328e5c09b4;
+    /// @notice Uniswap v4 StateView on Ethereum Sepolia, the read side of the PoolManager.
+    address internal constant STATE_VIEW = 0xE1Dd9c3fA50EDB962E442f60DfBc432e24537E4C;
     address internal constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
 
     uint8 internal constant MAX_UNWIND_PCT = 25;
@@ -58,6 +60,7 @@ contract DeployVault is Script {
             IAqua(AQUA),
             router,
             POSITION_MANAGER,
+            STATE_VIEW,
             tokenId,
             deployer,
             MAX_UNWIND_PCT,

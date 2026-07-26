@@ -24,6 +24,8 @@ contract Deploy is Script {
     address internal constant AQUA = 0x499943E74FB0cE105688beeE8Ef2ABec5D936d31;
     /// @notice Uniswap v4 PositionManager on Ethereum Sepolia.
     address internal constant POSITION_MANAGER = 0x429ba70129df741B2Ca2a85BC3A2a3328e5c09b4;
+    /// @notice Uniswap v4 StateView on Ethereum Sepolia, the read side of the PoolManager.
+    address internal constant STATE_VIEW = 0xE1Dd9c3fA50EDB962E442f60DfBc432e24537E4C;
     /// @notice Only a constructor argument. The demo pair is a pair of freshly minted test tokens.
     address internal constant WETH = 0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14;
 
@@ -55,6 +57,7 @@ contract Deploy is Script {
             IAqua(AQUA),
             address(router),
             POSITION_MANAGER,
+            STATE_VIEW,
             tokenId,
             deployer,
             MAX_UNWIND_PCT,
