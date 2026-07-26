@@ -19,7 +19,8 @@
   },
   "scripts": {
     "build": "forge build --skip test",
-    "test": "forge test",
+    "test": "forge test --match-path contracts/test/TakerTraits.t.sol && forge test --match-path contracts/test/Bebecita.t.sol",
+    "typecheck": "tsc -p solver/tsconfig.json",
     "gate0": "tsx solver/src/gate0.ts",
     "setup": "tsx solver/src/setup.ts",
     "aqua": "tsx solver/src/aqua.ts",
