@@ -442,7 +442,7 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
             </div>
 
             <div className="wallet-readiness" aria-live="polite">
-              <span>{taker ? `${fmtAmount(taker.balance, inDecimals)} ${inSymbol}` : 'Balance —'}</span>
+              <span>{taker ? `${fmtAmount(taker.balance, inDecimals)} ${inSymbol}` : 'Balance not read'}</span>
               {taker && parsedAmount !== null && parsedAmount > 0n ? (
                 <>
                   <span className={hasBalance ? 'ready' : 'needs-action'}>
