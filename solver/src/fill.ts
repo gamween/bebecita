@@ -232,7 +232,11 @@ async function main() {
   info('/lp/decrease    ', `${plan.unwindPercent}% -> ${tokens(plan.releasedIn, symbolIn)} + ${tokens(plan.releasedOut, symbolOut)}`)
   info('calldata        ', `${(plan.decreaseCalldata.length - 2) / 2} bytes`)
   info('surplus float   ', `${tokens(plan.surplus, symbolOut)} stays in the vault, the cost of an integer percentage`)
-  info('/lp/increase    ', `${tokens(plan.redeposit, symbolOut)} named, the API computes the other leg`)
+  info(
+    '/lp/increase    ',
+    `${tokens(plan.redeposit, plan.redepositToken === plan.tokenOut ? symbolOut : symbolIn)} named on the side ` +
+      "the pool's ratio makes scarce, the API computes the other leg",
+  )
   info('calldata        ', `${(plan.increaseCalldata.length - 2) / 2} bytes`)
   info('taker traits    ', `${(plan.takerTraitsAndData.length - 2) / 2} bytes`)
   info('api quota left  ', uniswap.remainingQuota ?? 'n/a')
