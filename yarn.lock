@@ -60,7 +60,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@1inch/swap-vm@github:1inch/swap-vm#main":
+"@1inch/swap-vm@github:1inch/swap-vm#b5e0e4d72242ec44ac636d5e6ce0c5686619b00d":
   version: 0.0.6
   resolution: "@1inch/swap-vm@https://github.com/1inch/swap-vm.git#commit=b5e0e4d72242ec44ac636d5e6ce0c5686619b00d"
   dependencies:
@@ -2605,7 +2605,7 @@ __metadata:
   dependencies:
     "@1inch/aqua": "github:1inch/aqua#v1.0.0"
     "@1inch/solidity-utils": 6.9.10
-    "@1inch/swap-vm": "github:1inch/swap-vm#main"
+    "@1inch/swap-vm": "github:1inch/swap-vm#b5e0e4d72242ec44ac636d5e6ce0c5686619b00d"
     "@openzeppelin/contracts": 5.4.0
     dotenv: ^16.4.5
     forge-std: "github:foundry-rs/forge-std#v1.11.0"
