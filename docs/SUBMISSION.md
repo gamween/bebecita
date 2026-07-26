@@ -23,7 +23,7 @@ a number written once goes stale and a number with its own command does not.
 | Public GitHub repository, open source | done | github.com/gamween/bebecita, MIT |
 | Uniswap API with a valid Developer Platform key | done | `x-api-key` on every LP call, `yarn gate0` proves the key live |
 | API powers core functionality | done | liquidity provision, literally: `/lp/decrease` and `/lp/increase` calldata executed on-chain inside every fill |
-| FEEDBACK.md | done | 15 reproducible findings, 11 Uniswap and 4 1inch, each with a repro and a suggestion. `grep -c '^### ' FEEDBACK.md` |
+| FEEDBACK.md | done | 16 reproducible findings, 11 Uniswap and 5 1inch, each with a repro and a suggestion. `grep -c '^### ' FEEDBACK.md` |
 | Developer Feedback form submitted, with the link to FEEDBACK.md | **TODO, Fianso** | developers.uniswap.org/hackathon-feedback |
 | README identifies the relevant contracts and code lines | done | `SwapVM.sol:310-314`, `:321`, `Aqua.sol:63-70` in the README and on the diagram arrow |
 
