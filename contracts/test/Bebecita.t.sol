@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import { Test } from "forge-std/Test.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { Test, stdError } from "forge-std/Test.sol";
 
 import { Aqua } from "@1inch/aqua/src/Aqua.sol";
 import { IAqua } from "@1inch/aqua/src/interfaces/IAqua.sol";
+import { SafeERC20 } from "@1inch/solidity-utils/contracts/libraries/SafeERC20.sol";
 import { ISwapVM } from "@1inch/swap-vm/src/interfaces/ISwapVM.sol";
 import { MakerTraitsLib } from "@1inch/swap-vm/src/libs/MakerTraits.sol";
 import { TakerTraitsLib } from "@1inch/swap-vm/src/libs/TakerTraits.sol";
 import { Opcode } from "@1inch/swap-vm/src/libs/OpcodeList.sol";
+import { Controls } from "@1inch/swap-vm/src/instructions/Controls.sol";
 import { XYCConcentrateArgsBuilder } from "@1inch/swap-vm/src/instructions/XYCConcentrate.sol";
 
 import { BebecitaRouter } from "../src/routers/BebecitaRouter.sol";
@@ -18,6 +19,7 @@ import { UnwindPricedBalancesArgsBuilder } from "../src/instructions/UnwindPrice
 import { IHookStats, PoolKey } from "../src/interfaces/IHookStats.sol";
 import { TestERC20 } from "../src/mocks/TestERC20.sol";
 import { MockPositionManager } from "../src/mocks/MockPositionManager.sol";
+import { MockStateView } from "../src/mocks/MockStateView.sol";
 
 /// @title BebecitaTest
 /// @notice The behaviour of a maker whose inventory lives outside its wallet.
@@ -28,6 +30,14 @@ contract BebecitaTest is Test {
     uint8 internal constant MAX_UNWIND_PCT = 50;
     uint16 internal constant HAIRCUT_BPS = 500;
     uint128 internal constant UNITS_PER_LIQUIDITY = 1e18;
+
+    /// @notice The position is full range and the pool sits at parity, which is the live shape on Sepolia.
+    /// @dev At parity inside a symmetric range a unit of liquidity is one of each token, which is why the
+    ///      maker's single scalar of 1e18 was honest here and drifts as soon as the pool moves. Both facts get
+    ///      their own assertions below.
+    int24 internal constant TICK_LOWER = -887220;
+    int24 internal constant TICK_UPPER = 887220;
+    uint160 internal constant SQRT_PRICE_PARITY = 79228162514264337593543950336;
 
     /// @notice The bounds the live book ships, in the instruction's 1e18 fixed point, `sqrt(tokenGt/tokenLt)`.
     /// @dev The position funding the book is full range, ticks -887220 to 887220, and full range does not
@@ -51,8 +61,10 @@ contract BebecitaTest is Test {
     BebecitaRouter internal router;
     BebecitaVault internal vault;
     MockPositionManager internal posm;
+    MockStateView internal stateView;
     TestERC20 internal token0;
     TestERC20 internal token1;
+    PoolKey internal poolKey;
 
     address internal taker = address(uint160(0x7A4E));
 
@@ -64,17 +76,31 @@ contract BebecitaTest is Test {
         (token0, token1) = address(a) < address(b) ? (a, b) : (b, a);
 
         posm = new MockPositionManager(address(token0), address(token1), UNITS_PER_LIQUIDITY);
+        stateView = new MockStateView();
         router = new BebecitaRouter(address(aqua), address(0), address(this), "Bebecita", "1");
         vault = new BebecitaVault(
             IAqua(address(aqua)),
             address(router),
             address(posm),
+            address(stateView),
             TOKEN_ID,
             address(this),
             MAX_UNWIND_PCT,
             HAIRCUT_BPS,
             UNITS_PER_LIQUIDITY
         );
+
+        // The pool the position sits in. The vault reads its price and the position's ticks on chain, which is
+        // what lets a guard say what a unit of liquidity is worth in each token.
+        poolKey = PoolKey({
+            currency0: address(token0),
+            currency1: address(token1),
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: address(0)
+        });
+        posm.configurePool(poolKey, TICK_LOWER, TICK_UPPER);
+        stateView.setPrice(keccak256(abi.encode(poolKey)), SQRT_PRICE_PARITY, 0);
 
         // The position holds the inventory. The position manager holds the tokens behind it.
         posm.seed(TOKEN_ID, POSITION_LIQUIDITY);
@@ -100,9 +126,12 @@ contract BebecitaTest is Test {
     /// @notice The instruction occupies the reserved slot of the correct family bank.
     /// @dev `OpcodeList.sol` states: "New instruction MUST take the next free `_Ix` slot of its family bank."
     ///      Our instruction adjusts a balance register, so it belongs to 0x90-0xaf, whose next free slot is
-    ///      `_92`. Asserting it here means the README does not have to be believed.
+    ///      `_92`. The dispatch constant is now `uint256(Opcode._92)` rather than a literal, so the sponsor's
+    ///      enum is the single source of truth and this test documents which slot that is rather than pairing
+    ///      two hand written numbers.
     function test_InstructionTakesReservedSlotOfBalancesTuningBank() public view {
         assertEq(uint256(Opcode._92), router.OPCODE_UNWIND_PRICED_BALANCE_OUT(), "wrong reserved slot");
+        assertEq(router.OPCODE_UNWIND_PRICED_BALANCE_OUT(), 0x92, "the reserved slot is 0x92");
         assertEq(uint256(Opcode.StaticBalances), 0x90, "bank moved");
         assertEq(uint256(Opcode.DynamicBalances), 0x91, "bank moved");
     }
@@ -114,7 +143,10 @@ contract BebecitaTest is Test {
     /// @notice Without the instruction, Aqua quotes depth the maker cannot deliver and the swap dies at the end.
     /// @dev This is the failure the whole project exists to close, and it is worth having as an executable
     ///      assertion rather than a slide: the quote succeeds, and the swap reverts inside `Aqua.pull` on the
-    ///      `safeTransferFrom` out of an empty wallet.
+    ///      `safeTransferFrom` out of an empty wallet. The revert is named, not merely counted:
+    ///      `Aqua` settles through the `SafeERC20` of `1inch/solidity-utils`, whose low level path surfaces a
+    ///      failed pull as `SafeTransferFromFailed`. Asserting that selector is what makes this test the
+    ///      narration it claims to be.
     function test_WithoutInstruction_QuotePassesAndSwapReverts() public {
         ISwapVM.Order memory order = _buildOrder(false);
         _ship(order);
@@ -123,9 +155,10 @@ contract BebecitaTest is Test {
 
         (, uint256 quotedOut,) = ISwapVM(address(router)).quote(order, 100 ether, takerData);
         assertGt(quotedOut, 0, "quote should succeed against the shipped virtual balance");
+        assertEq(token1.balanceOf(address(vault)), 0, "the maker must be empty for this to mean anything");
 
         vm.prank(taker);
-        vm.expectRevert();
+        vm.expectRevert(SafeERC20.SafeTransferFromFailed.selector);
         ISwapVM(address(router)).swap(order, 100 ether, takerData);
     }
 
@@ -155,8 +188,35 @@ contract BebecitaTest is Test {
         assertEq(vault.reachableFromPosition(), expected, "cap and haircut must compose in that order");
     }
 
-    /// @notice Quote and swap agree, which is the only invariant of the core suite that cannot be skipped.
-    /// @dev The instruction is `view`, so it satisfies this structurally rather than by discipline.
+    /// @notice A program carrying a haircut above one hundred percent is a named error, not a panic.
+    /// @dev The args builder rejects it, so only a hand written program can get there, and the difference
+    ///      between `HaircutOutOfRange` and `Panic(0x11)` is the difference between a diagnosis and a shrug.
+    function test_Instruction_RejectsAnImpossibleHaircut() public {
+        bytes memory args = abi.encodePacked(address(posm), TOKEN_ID, uint16(10_001), MAX_UNWIND_PCT, UNITS_PER_LIQUIDITY);
+        bytes memory curveArgs = XYCConcentrateArgsBuilder.build2D(SQRT_PRICE_MIN, SQRT_PRICE_MAX);
+        bytes memory program = abi.encodePacked(
+            uint8(router.OPCODE_UNWIND_PRICED_BALANCE_OUT()),
+            uint8(args.length),
+            args,
+            uint8(uint256(Opcode.XYCConcentrateSwap)),
+            uint8(curveArgs.length),
+            curveArgs,
+            uint8(uint256(Opcode.Salt)),
+            uint8(1),
+            bytes1(0x77)
+        );
+
+        ISwapVM.Order memory order = _buildOrderFromProgram(program);
+        _ship(order);
+
+        vm.expectRevert(abi.encodeWithSelector(bytes4(keccak256("HaircutOutOfRange(uint16)")), uint16(10_001)));
+        ISwapVM(address(router)).quote(order, 50 ether, _buildTakerData("", ""));
+    }
+
+    /// @notice Quote and swap agree, one of the two invariants of the core suite that are never skipped.
+    /// @dev The instruction is `view`, so it satisfies this structurally rather than by discipline. The other
+    ///      never skipped invariant is balance sufficiency, which `CoreInvariants.t.sol` asserts after every
+    ///      configurable check, and which is precisely what instruction `0x92` enforces.
     function test_QuoteAndSwapReturnTheSameAmounts() public {
         ISwapVM.Order memory order = _buildOrder(true);
         _ship(order);
@@ -265,7 +325,9 @@ contract BebecitaTest is Test {
     ///      `XYCSwap` never clamps its own output. In exact-out it computes
     ///      `amountIn = ceilDiv(amountOut * balanceIn, balanceOut - amountOut)`, so once instruction `0x92`
     ///      has lowered `balanceOut` to what the position can actually release, any taker asking for more than
-    ///      that gets an arithmetic panic out of the VM, with nothing in the revert data naming the cause.
+    ///      that underflows that subtraction and gets `Panic(0x11)` out of the VM, with nothing in the revert
+    ///      data naming the cause. That panic is asserted by type here rather than by the fact that something
+    ///      went wrong.
     ///
     ///      `XYCConcentrate` clamps on `balanceOut` and re-solves the other side for the clamped amount, in
     ///      both directions, since the partial fill work merged into `swap-vm` main. The taker is paid exactly
@@ -279,7 +341,7 @@ contract BebecitaTest is Test {
 
         ISwapVM.Order memory onXycSwap = _buildXycSwapOrder(true, 0x03);
         _ship(onXycSwap);
-        vm.expectRevert();
+        vm.expectRevert(stdError.arithmeticError);
         ISwapVM(address(router)).quote(onXycSwap, ask, takerData);
 
         ISwapVM.Order memory onConcentrate = _buildOrder(true);
@@ -337,6 +399,48 @@ contract BebecitaTest is Test {
     }
 
     // ---------------------------------------------------------------------
+    // The rewired Controls, executed rather than asserted
+    // ---------------------------------------------------------------------
+
+    /// @notice One program that runs `JumpIfDirection`, `Stop` and `Revert` through this router.
+    ///
+    /// @dev These three opcodes exist in `Controls.sol` and are unreachable from any Aqua program, because
+    ///      `AquaOpcodes` never dispatches them. `BebecitaOpcodes` wires them back, and until now that claim
+    ///      was asserted in prose and never executed, which is exactly the kind of thing a reviewer is right
+    ///      to disbelieve. This program uses all three at once:
+    ///
+    ///      ```
+    ///      pc   0  JumpIfDirection(expect tokenIn < tokenOut, -> 11)
+    ///      pc   5  Revert(0xdeadbeef)          reached only in the wrong direction
+    ///      pc  11  0x92 unwind
+    ///      pc  84  0x51 concentrate
+    ///      pc 150  Stop
+    ///      pc 152  Revert(0xdeadbeef)          reached only if Stop did not halt
+    ///      pc 158  Salt
+    ///      ```
+    ///
+    ///      A fill in the shipped direction proves two things at once: the jump was taken, since the first
+    ///      `Revert` did not fire, and `Stop` halted the loop, since the second one did not either. A quote in
+    ///      the other direction proves the jump is conditional and that `Revert` reverts with its own payload.
+    function test_Controls_JumpIfDirectionStopAndRevertAllExecute() public {
+        ISwapVM.Order memory order = _buildControlsOrder();
+        _ship(order);
+
+        uint256 takerBefore = token1.balanceOf(taker);
+        bytes memory takerData = _buildTakerData(posm.encodeDecrease(TOKEN_ID, 200 ether, address(vault)), "");
+
+        vm.prank(taker);
+        (, uint256 amountOut,) = ISwapVM(address(router)).swap(order, 50 ether, takerData);
+
+        assertGt(amountOut, 0, "the jump was not taken, or Stop did not halt before the trailing Revert");
+        assertEq(token1.balanceOf(taker), takerBefore + amountOut, "the fill did not settle");
+
+        // The other direction falls through to the guarding `Revert`, with the payload the program carries.
+        vm.expectRevert(abi.encodeWithSelector(Controls.InstructionRevert.selector, hex"deadbeef"));
+        ISwapVM(address(router)).quote(order, 50 ether, _buildTakerData("", "", true, false));
+    }
+
+    // ---------------------------------------------------------------------
     // The settlement loop
     // ---------------------------------------------------------------------
 
@@ -373,7 +477,7 @@ contract BebecitaTest is Test {
         );
 
         vm.prank(taker);
-        vm.expectRevert();
+        vm.expectPartialRevert(BebecitaVault.UnwindShortfall.selector);
         ISwapVM(address(router)).swap(order, 50 ether, takerData);
     }
 
@@ -388,7 +492,14 @@ contract BebecitaTest is Test {
         );
 
         vm.prank(taker);
-        vm.expectRevert();
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                BebecitaVault.UnwindExceedsCap.selector,
+                POSITION_LIQUIDITY,
+                POSITION_LIQUIDITY - overCap,
+                MAX_UNWIND_PCT
+            )
+        );
         ISwapVM(address(router)).swap(order, 50 ether, takerData);
     }
 
@@ -402,16 +513,243 @@ contract BebecitaTest is Test {
         );
 
         vm.prank(taker);
-        vm.expectRevert();
+        vm.expectRevert(
+            abi.encodeWithSelector(BebecitaVault.UnexpectedSelector.selector, bytes4(hex"a9059cbb"))
+        );
         ISwapVM(address(router)).swap(order, 50 ether, takerData);
     }
 
-    /// @notice Only the router may invoke the maker hooks.
-    function test_Hooks_RejectAnyCallerButTheRouter() public {
-        vm.expectRevert();
-        vault.preTransferOut(
-            address(vault), taker, address(token0), address(token1), 0, 1, bytes32(0), "", ""
+    /// @notice Guard 2: a payload may release the token the fill owes and still not be allowed to spend the
+    ///         other side of the book paying for something else.
+    ///
+    /// @dev Untested until now, and it is not a theoretical guard: a v4 payload can compose a decrease with an
+    ///      increase settled by the maker, so the position gives with one hand and takes with the other. Here
+    ///      the payload unwinds 400 of liquidity, routes all of the token1 proceeds to the vault and all of the
+    ///      token0 proceeds to the taker, then redeposits 100 paid for by the vault. The output side grows by
+    ///      300, so guard 1 is satisfied and the fill looks funded; the input side falls by 100, which is the
+    ///      leak, and guard 2 is the only thing that sees it.
+    function test_Fill_RevertsWhenThePayloadDrainsTheOtherSideOfTheBook() public {
+        ISwapVM.Order memory order = _buildOrder(true);
+        _ship(order);
+
+        uint256 decreaseBy = 400 ether;
+        uint256 increaseBy = 100 ether;
+        token0.mint(address(vault), increaseBy);
+
+        MockPositionManager.Leg[] memory legs = new MockPositionManager.Leg[](3);
+        legs[0] = MockPositionManager.Leg(
+            posm.KIND_DECREASE(), TOKEN_ID, decreaseBy, address(vault), 0, posm.releaseFor(decreaseBy)
         );
+        legs[1] = MockPositionManager.Leg(
+            posm.KIND_DECREASE(), TOKEN_ID, 0, taker, posm.releaseFor(decreaseBy), 0
+        );
+        legs[2] = MockPositionManager.Leg(
+            posm.KIND_INCREASE(),
+            TOKEN_ID,
+            increaseBy,
+            address(vault),
+            posm.releaseFor(increaseBy),
+            posm.releaseFor(increaseBy)
+        );
+
+        bytes memory takerData = _buildTakerData(posm.encodeLegs(legs), new bytes(0));
+
+        vm.prank(taker);
+        vm.expectRevert(
+            abi.encodeWithSelector(BebecitaVault.CollateralLeak.selector, address(token0), increaseBy, 0)
+        );
+        ISwapVM(address(router)).swap(order, 50 ether, takerData);
+    }
+
+    // ---------------------------------------------------------------------
+    // The conservation guard
+    // ---------------------------------------------------------------------
+
+    /// @notice Guard 5: a payload may not unwind the position and route the proceeds anywhere but here.
+    ///
+    /// @dev This is the hole the first four guards left open, and it is the reason this file exists in its
+    ///      current shape. The payload removes the entire per fill cap, hands the vault exactly `amountOut` of
+    ///      the token the fill owes, and sends the whole remainder of both tokens to the taker. Nothing about
+    ///      it is exotic: the real `modifyLiquidities` composes `DECREASE_LIQUIDITY` with `TAKE` naming any
+    ///      recipient, so this is one API call away for anyone who reads the v4 Actions list.
+    function test_Attack_UnwindThatRoutesTheSurplusToTheTakerIsRejected() public {
+        ISwapVM.Order memory order = _buildOrder(true);
+        _ship(order);
+
+        (bytes memory payload,) = _divertedUnwind(order);
+        bytes memory takerData = _buildTakerData(payload, new bytes(0));
+
+        vm.prank(taker);
+        vm.expectPartialRevert(BebecitaVault.UnwindValueDiverted.selector);
+        ISwapVM(address(router)).swap(order, 50 ether, takerData);
+    }
+
+    /// @notice The same payload satisfies guards 1, 2 and 3, which is what makes guard 5 a fix rather than a
+    ///         belt on top of a working set.
+    ///
+    /// @dev This test proves the vulnerability was real. It executes the attacker's payload directly against
+    ///      the position manager, as the vault, measures exactly what the four original guards would have
+    ///      measured, and asserts that every one of them holds:
+    ///
+    ///        guard 1, the output balance grew by at least `amountOut`, met exactly rather than generously;
+    ///        guard 2, the input balance did not shrink, met with equality because the released token0 never
+    ///                 arrived at all, and a balance that never moves cannot fall;
+    ///        guard 3, the liquidity removed is exactly `maxUnwindPct`, so the cap is met and not exceeded.
+    ///
+    ///      Then it rolls the state back and runs the same payload through the real fill, where guard 5 stops
+    ///      it. Repeat the first half with dust sized fills and the position drains at `maxUnwindPct` per
+    ///      fill, which is the whole finding in one sentence.
+    function test_Attack_WouldHavePassedTheFirstThreeGuards() public {
+        ISwapVM.Order memory order = _buildOrder(true);
+        _ship(order);
+
+        (bytes memory payload, uint256 amountOut) = _divertedUnwind(order);
+
+        uint256 snapshot = vm.snapshotState();
+
+        uint256 outBefore = token1.balanceOf(address(vault));
+        uint256 inBefore = token0.balanceOf(address(vault));
+        uint256 liquidityBefore = posm.liquidityOf(TOKEN_ID);
+
+        vm.prank(address(vault));
+        (bool ok,) = address(posm).call(payload);
+        assertTrue(ok, "the diverting payload is a legal position manager call");
+
+        uint256 outAfter = token1.balanceOf(address(vault));
+        uint256 inAfter = token0.balanceOf(address(vault));
+        uint256 removed = liquidityBefore - posm.liquidityOf(TOKEN_ID);
+
+        assertEq(outAfter, outBefore + amountOut, "guard 1 is met exactly, which is all a floor asks");
+        assertEq(inAfter, inBefore, "guard 2 holds with equality, because the released token0 never arrived");
+        assertLe(removed * 100, liquidityBefore * MAX_UNWIND_PCT, "guard 3 caps liquidity, and the cap is met");
+
+        // And what the taker walked away with, which is what none of those three could see.
+        assertEq(token0.balanceOf(taker) - 1_000 ether, posm.releaseFor(removed), "the whole token0 leg diverted");
+        assertEq(token1.balanceOf(taker), posm.releaseFor(removed) - amountOut, "and the token1 surplus with it");
+
+        vm.revertToState(snapshot);
+
+        vm.prank(taker);
+        vm.expectPartialRevert(BebecitaVault.UnwindValueDiverted.selector);
+        ISwapVM(address(router)).swap(order, 50 ether, _buildTakerData(payload, new bytes(0)));
+    }
+
+    /// @notice An honest fill still settles, which is the other half of the guard being useful.
+    /// @dev A conservation check that reverts on the payload the Uniswap API builds would be worse than no
+    ///      check at all, so the ordinary path is asserted right beside the attack: full proceeds to the vault,
+    ///      a surplus kept as float, and the fill goes through.
+    function test_ConservationGuard_LeavesTheHonestUnwindAlone() public {
+        ISwapVM.Order memory order = _buildOrder(true);
+        _ship(order);
+
+        uint256 unwind = POSITION_LIQUIDITY * MAX_UNWIND_PCT / 100;
+        bytes memory takerData = _buildTakerData(posm.encodeDecrease(TOKEN_ID, unwind, address(vault)), "");
+
+        vm.prank(taker);
+        (, uint256 amountOut,) = ISwapVM(address(router)).swap(order, 50 ether, takerData);
+
+        assertGt(amountOut, 0, "the honest fill must still settle at the full cap");
+        assertEq(
+            token1.balanceOf(address(vault)),
+            posm.releaseFor(unwind) - amountOut,
+            "the token1 surplus stays with the maker as float"
+        );
+        assertEq(token0.balanceOf(address(vault)), posm.releaseFor(unwind) + 50 ether, "the token0 leg stayed too");
+    }
+
+    // ---------------------------------------------------------------------
+    // The redeposit, which nothing used to exercise
+    // ---------------------------------------------------------------------
+
+    /// @notice `postTransferIn` puts the taker's input back into the position, in the same transaction.
+    ///
+    /// @dev Never executed until now: every test passed an empty redeposit payload, which makes the hook
+    ///      return on its first line, so `MockPositionManager.encodeIncrease` was dead code and guard 4 was
+    ///      unreachable. This is the second half of the settlement loop the README draws, and the ordering it
+    ///      depends on is the reason `IS_FIRST_TRANSFER_FROM_TAKER` is pinned to zero: the hook runs after the
+    ///      push, so the vault owns the taker's input by the time it redeposits, which is what makes a two
+    ///      sided deposit fundable at all.
+    function test_Redeposit_PutsTheInventoryBackToWorkInTheSameTransaction() public {
+        ISwapVM.Order memory order = _buildOrder(true);
+        _ship(order);
+
+        uint256 unwind = 200 ether;
+        uint256 redeposit = 50 ether;
+        bytes memory takerData = _buildTakerData(
+            posm.encodeDecrease(TOKEN_ID, unwind, address(vault)),
+            posm.encodeIncrease(TOKEN_ID, redeposit, address(vault))
+        );
+
+        uint256 liquidityBefore = posm.liquidityOf(TOKEN_ID);
+
+        vm.recordLogs();
+        vm.prank(taker);
+        (, uint256 amountOut,) = ISwapVM(address(router)).swap(order, 50 ether, takerData);
+
+        assertGt(amountOut, 0, "the fill produced nothing");
+        assertEq(
+            posm.liquidityOf(TOKEN_ID),
+            liquidityBefore - unwind + redeposit,
+            "the position did not come back up by the redeposit"
+        );
+        assertEq(
+            token1.balanceOf(address(vault)),
+            posm.releaseFor(unwind) - amountOut - posm.releaseFor(redeposit),
+            "the redeposit was not paid out of the vault's own float"
+        );
+    }
+
+    /// @notice Guard 4: a redeposit may only grow the position.
+    /// @dev Also untested until now, for the same reason. The taker supplies this calldata too, so nothing
+    ///      stops it from putting a decrease in the redeposit slice and unwinding a second time after the
+    ///      first cap has already been spent. The hook compares liquidity across its own call and refuses.
+    function test_Redeposit_RevertsWhenItReducesThePosition() public {
+        ISwapVM.Order memory order = _buildOrder(true);
+        _ship(order);
+
+        bytes memory takerData = _buildTakerData(
+            posm.encodeDecrease(TOKEN_ID, 200 ether, address(vault)),
+            posm.encodeDecrease(TOKEN_ID, 100 ether, address(vault))
+        );
+
+        vm.prank(taker);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                BebecitaVault.RedepositReducedPosition.selector, 800 ether, 700 ether
+            )
+        );
+        ISwapVM(address(router)).swap(order, 50 ether, takerData);
+    }
+
+    // ---------------------------------------------------------------------
+    // Hook access control
+    // ---------------------------------------------------------------------
+
+    /// @notice Only the router may invoke the maker hooks. All four of them.
+    /// @dev Three of these were uncovered. `preTransferIn` and `postTransferOut` do nothing but this check, so
+    ///      a missing modifier on either would have been invisible, and `postTransferIn` executes taker
+    ///      supplied calldata against the position manager, so a missing one there would be the whole vault.
+    function test_Hooks_RejectAnyCallerButTheRouter() public {
+        bytes memory expected = abi.encodeWithSelector(BebecitaVault.UnauthorizedCaller.selector, address(this));
+
+        vm.expectRevert(expected);
+        vault.preTransferOut(address(vault), taker, address(token0), address(token1), 0, 1, bytes32(0), "", "");
+
+        vm.expectRevert(expected);
+        vault.postTransferIn(address(vault), taker, address(token0), address(token1), 0, 1, bytes32(0), "", "");
+
+        vm.expectRevert(expected);
+        vault.preTransferIn(address(vault), taker, address(token0), address(token1), 0, 1, bytes32(0), "", "");
+
+        vm.expectRevert(expected);
+        vault.postTransferOut(address(vault), taker, address(token0), address(token1), 0, 1, bytes32(0), "", "");
+    }
+
+    /// @notice And the taker cannot reach them by pretending to be the router either.
+    function test_Hooks_RejectTheTakerItself() public {
+        vm.prank(taker);
+        vm.expectRevert(abi.encodeWithSelector(BebecitaVault.UnauthorizedCaller.selector, taker));
+        vault.preTransferOut(address(vault), taker, address(token0), address(token1), 0, 1, bytes32(0), "", "");
     }
 
     // ---------------------------------------------------------------------
@@ -421,25 +759,109 @@ contract BebecitaTest is Test {
     /// @notice The vault reports under URC-3 and honours the standard's normative invariant.
     /// @dev "For each token, getEffectiveLiquidity SHOULD be less than or equal to getReserves."
     function test_HookStats_EffectiveLiquidityNeverExceedsReserves() public view {
-        PoolKey memory key = PoolKey({
-            currency0: address(token0),
-            currency1: address(token1),
-            fee: 3000,
-            tickSpacing: 60,
-            hooks: address(0)
-        });
-
-        (uint256 reserves0, uint256 reserves1) = vault.getReserves(key);
-        (uint256 effective0, uint256 effective1) = vault.getEffectiveLiquidity(key);
+        (uint256 reserves0, uint256 reserves1) = vault.getReserves(poolKey);
+        (uint256 effective0, uint256 effective1) = vault.getEffectiveLiquidity(poolKey);
 
         assertLe(effective0, reserves0, "URC-3 invariant violated on token0");
         assertLe(effective1, reserves1, "URC-3 invariant violated on token1");
         assertTrue(vault.supportsInterface(type(IHookStats).interfaceId), "URC-3 not advertised");
     }
 
+    /// @notice At parity the two sides are equal, which is the only case the old scalar ever got right.
+    function test_HookStats_AtParityTheTwoSidesMatchThePosition() public view {
+        (uint256 reserves0, uint256 reserves1) = vault.getReserves(poolKey);
+
+        assertApproxEqAbs(reserves0, POSITION_LIQUIDITY, 1e6, "token0 reserves at parity");
+        assertApproxEqAbs(reserves1, POSITION_LIQUIDITY, 1e6, "token1 reserves at parity");
+    }
+
+    /// @notice Move the pool and the report moves with it, per token, which the old one could not do.
+    ///
+    /// @dev The previous implementation credited `liquidity * unitsPerLiquidityE18` to both sides, so it
+    ///      reported the same number for token0 and token1 whatever the price was. That is right at parity and
+    ///      wrong everywhere else, and it is wrong in the dangerous direction on whichever side the pool has
+    ///      moved away from. At a price of four a full range unit of liquidity is worth half a token0 and two
+    ///      token1, and the report now says so.
+    function test_HookStats_FollowsThePoolPriceOnEachSideSeparately() public {
+        stateView.setPrice(keccak256(abi.encode(poolKey)), SQRT_PRICE_PARITY * 2, 13863);
+
+        (uint256 reserves0, uint256 reserves1) = vault.getReserves(poolKey);
+
+        assertApproxEqAbs(reserves0, POSITION_LIQUIDITY / 2, 1e6, "token0 at a price of four");
+        assertApproxEqAbs(reserves1, POSITION_LIQUIDITY * 2, 1e6, "token1 at a price of four");
+        assertGt(reserves1, reserves0 * 3, "the two sides must separate as the pool moves");
+
+        // The maker's scalar does not follow, and that is the drift `yarn rebalance` prints and
+        // `docs/ARCHITECTURE.md` documents. The report is the on chain truth; the scalar is a parameter.
+        assertEq(
+            vault.reachableFromPosition(),
+            POSITION_LIQUIDITY * MAX_UNWIND_PCT / 100 * (10_000 - HAIRCUT_BPS) / 10_000,
+            "the instruction's scalar is not supposed to move on its own"
+        );
+    }
+
+    /// @notice Asked about a pool that is not the one backing the position, the vault refuses to answer.
+    /// @dev URC-3's conformance list is written around a named pool, and a reporter that answers for any key
+    ///      handed to it is reporting somebody else's reserves. The float lookups alone would have made the
+    ///      old implementation return a plausible looking number for an unrelated pair.
+    function test_HookStats_RefusesAPoolKeyThatIsNotTheBackingPosition() public {
+        PoolKey memory other = PoolKey({
+            currency0: address(token0),
+            currency1: address(token1),
+            fee: 500,
+            tickSpacing: 10,
+            hooks: address(0)
+        });
+
+        bytes memory expected = abi.encodeWithSelector(
+            BebecitaVault.UnexpectedPool.selector,
+            keccak256(abi.encode(poolKey)),
+            keccak256(abi.encode(other))
+        );
+
+        vm.expectRevert(expected);
+        vault.getReserves(other);
+
+        vm.expectRevert(expected);
+        vault.getEffectiveLiquidity(other);
+    }
+
+    /// @notice Free float is part of the reserves, on the side it actually sits on.
+    function test_HookStats_CountsFreeFloatOnTheRightSide() public {
+        (uint256 before0, uint256 before1) = vault.getReserves(poolKey);
+        token1.mint(address(vault), 123 ether);
+        (uint256 after0, uint256 after1) = vault.getReserves(poolKey);
+
+        assertEq(after0, before0, "float on one side must not appear on the other");
+        assertEq(after1, before1 + 123 ether, "float on the side it sits on");
+    }
+
     // ---------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------
+
+    /// @dev The attack payload, and the `amountOut` it is sized against.
+    ///
+    ///      One decrease of the entire per fill cap, split into two routings of the same proceeds: exactly
+    ///      `amountOut` of token1 to the vault, and everything else, both tokens, to the taker. The mock
+    ///      refuses to route more or less than the decrease released, so this is a diversion and never a mint.
+    function _divertedUnwind(ISwapVM.Order memory order)
+        internal
+        view
+        returns (bytes memory payload, uint256 amountOut)
+    {
+        (, amountOut,) = ISwapVM(address(router)).quote(order, 50 ether, _buildTakerData("", ""));
+
+        uint256 cap = POSITION_LIQUIDITY * MAX_UNWIND_PCT / 100;
+        uint256 released = posm.releaseFor(cap);
+
+        MockPositionManager.Leg[] memory legs = new MockPositionManager.Leg[](2);
+        legs[0] = MockPositionManager.Leg(posm.KIND_DECREASE(), TOKEN_ID, cap, address(vault), 0, amountOut);
+        legs[1] =
+            MockPositionManager.Leg(posm.KIND_DECREASE(), TOKEN_ID, 0, taker, released, released - amountOut);
+
+        payload = posm.encodeLegs(legs);
+    }
 
     /// @dev The shipped program: `0x92` then `0x51` parameterised as the live book is, then the salt.
     function _buildOrder(bool withInstruction) internal view returns (ISwapVM.Order memory) {
@@ -482,17 +904,49 @@ contract BebecitaTest is Test {
         bytes memory program = curve;
 
         if (withInstruction) {
-            bytes memory args = UnwindPricedBalancesArgsBuilder.build(
-                address(posm), TOKEN_ID, HAIRCUT_BPS, MAX_UNWIND_PCT, UNITS_PER_LIQUIDITY
-            );
-            program = abi.encodePacked(
-                uint8(router.OPCODE_UNWIND_PRICED_BALANCE_OUT()), uint8(args.length), args, program
-            );
+            program = abi.encodePacked(_unwindInstruction(), program);
         }
 
         // A salt keeps the order hash unique so the same economic strategy can be shipped more than once.
         program = abi.encodePacked(program, uint8(uint256(Opcode.Salt)), uint8(1), salt);
 
+        return _buildOrderFromProgram(program);
+    }
+
+    /// @dev `[0x92][args]`, the instruction as every program here carries it.
+    function _unwindInstruction() internal view returns (bytes memory) {
+        bytes memory args = UnwindPricedBalancesArgsBuilder.build(
+            address(posm), TOKEN_ID, HAIRCUT_BPS, MAX_UNWIND_PCT, UNITS_PER_LIQUIDITY
+        );
+        return abi.encodePacked(uint8(router.OPCODE_UNWIND_PRICED_BALANCE_OUT()), uint8(args.length), args);
+    }
+
+    /// @dev The program exercising the three rewired `Controls`. Offsets are asserted by the test that uses it.
+    function _buildControlsOrder() internal view returns (ISwapVM.Order memory) {
+        bytes memory curveArgs = XYCConcentrateArgsBuilder.build2D(SQRT_PRICE_MIN, SQRT_PRICE_MAX);
+
+        bytes memory program = abi.encodePacked(
+            // pc 0: five bytes. Jump past the guarding revert when tokenIn < tokenOut, which is the direction
+            // the book is shipped for.
+            uint8(uint256(Opcode.JumpIfDirection)), uint8(3), bytes1(0x01), uint16(11),
+            // pc 5: six bytes. Only reachable in the other direction.
+            uint8(uint256(Opcode.Revert)), uint8(4), bytes4(0xdeadbeef),
+            // pc 11: the ordinary program.
+            _unwindInstruction(),
+            uint8(uint256(Opcode.XYCConcentrateSwap)), uint8(curveArgs.length), curveArgs,
+            // pc 150: halt, so nothing below ever runs.
+            uint8(uint256(Opcode.Stop)), uint8(0),
+            // pc 152: reachable only if Stop did not stop.
+            uint8(uint256(Opcode.Revert)), uint8(4), bytes4(0xdeadbeef),
+            // pc 158: unreachable, and there only to keep the order hash unique.
+            uint8(uint256(Opcode.Salt)), uint8(1), bytes1(0x09)
+        );
+
+        return _buildOrderFromProgram(program);
+    }
+
+    /// @dev Wraps a program into the maker traits this book always uses.
+    function _buildOrderFromProgram(bytes memory program) internal view returns (ISwapVM.Order memory) {
         return MakerTraitsLib.build(
             MakerTraitsLib.Args({
                 maker: address(vault),
@@ -541,7 +995,7 @@ contract BebecitaTest is Test {
         view
         returns (bytes memory)
     {
-        return _buildTakerData(unwindPayload, redepositPayload, true);
+        return _buildTakerData(unwindPayload, redepositPayload, true, true);
     }
 
     /// @dev The same, with the direction of the quote made explicit. Exact-out is where `0x50` panics.
@@ -550,6 +1004,16 @@ contract BebecitaTest is Test {
         view
         returns (bytes memory)
     {
+        return _buildTakerData(unwindPayload, redepositPayload, isExactIn, true);
+    }
+
+    /// @dev And with the swap direction made explicit, which is what `JumpIfDirection` reads.
+    function _buildTakerData(
+        bytes memory unwindPayload,
+        bytes memory redepositPayload,
+        bool isExactIn,
+        bool isAToB
+    ) internal view returns (bytes memory) {
         return TakerTraitsLib.build(
             TakerTraitsLib.Args({
                 taker: taker,
@@ -558,7 +1022,7 @@ contract BebecitaTest is Test {
                 isStrictThresholdAmount: false,
                 isFirstTransferFromTaker: false,
                 useTransferFromAndAquaPush: true,
-                isAToB: true,
+                isAToB: isAToB,
                 threshold: "",
                 to: address(0),
                 deadline: 0,
