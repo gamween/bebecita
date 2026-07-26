@@ -660,6 +660,11 @@ a.btn {
   background: var(--bad);
 }
 
+/* Read, but not everything the page leads with. Warn rather than bad, because the fields below are still real. */
+.console-state .led.warn {
+  background: var(--warn);
+}
+
 .allocation-total {
   display: grid;
   gap: 3px;
@@ -1074,6 +1079,11 @@ a.btn {
   margin: 0 0 22px;
 }
 
+/* The console puts a panel behind this disclosure where the landing page puts a table. Same room underneath. */
+.deployment-disclosure .panel {
+  margin: 0 0 22px;
+}
+
 .disclosure-note {
   max-width: 90ch;
   margin: 0 0 24px;
@@ -1201,6 +1211,63 @@ td.addr {
 
 .readiness-stack:empty {
   display: none;
+}
+
+/*
+ * The live strip, above the card.
+ *
+ * Four figures the poll already reads, in the label and mono treatment of a panel field, so the page can be
+ * watched moving without opening anything. Cells rather than fields because there is no second column here for
+ * the numbers to align to: the label sits above its value and every cell is the same width.
+ */
+.livestrip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-top-color: var(--line-strong);
+  background: var(--line);
+}
+
+.livestrip-cell {
+  display: grid;
+  gap: 6px;
+  padding: 13px var(--gutter) 15px;
+  background: var(--panel);
+  min-width: 0;
+}
+
+.livestrip-label {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+
+.livestrip-value {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 17px;
+  overflow-wrap: anywhere;
+}
+
+.livestrip-value .unit {
+  display: block;
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--ink-faint);
+}
+
+.livestrip-value .unavailable {
+  font-size: 13px;
+}
+
+/* Left aligned here, unlike in a field, because the value it explains is left aligned too. */
+.livestrip-value .why {
+  margin-left: 0;
+  max-width: 30ch;
+  text-align: left;
 }
 
 .trade-card {
@@ -2940,6 +3007,13 @@ th {
 
 .client-results:empty {
   display: none;
+}
+
+/* The two cards that carry the maker's own numbers. Same column, same spacing as a result card. */
+.evidence {
+  display: grid;
+  gap: 12px;
+  margin-top: 24px;
 }
 
 .client-swap-summary {
