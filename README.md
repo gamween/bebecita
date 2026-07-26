@@ -13,7 +13,7 @@
 | Contract | Address |
 |---|---|
 | BebecitaRouter, our modified SwapVM | [`0x354422f6e4e3476b540E306A6DdFb4638d9EA5c3`](https://sepolia.etherscan.io/address/0x354422f6e4e3476b540E306A6DdFb4638d9EA5c3) |
-| BebecitaVault, the maker | [`0xE703F509ba1bF70BcFa4957a7090e73B627dE76a`](https://sepolia.etherscan.io/address/0xE703F509ba1bF70BcFa4957a7090e73B627dE76a) |
+| BebecitaVault, the maker | [`0x6A64a5BB9704119bb651b4f08D09b065F48902CD`](https://sepolia.etherscan.io/address/0x6A64a5BB9704119bb651b4f08D09b065F48902CD) |
 | bALPHA | [`0xdB41CB0A2EEFF8Ed53Ef019D4C9826744f500B7F`](https://sepolia.etherscan.io/address/0xdB41CB0A2EEFF8Ed53Ef019D4C9826744f500B7F) |
 | bBRAVO | [`0x0128Ac6B5E3364b022e55A0cf9c0cb4987B3B20f`](https://sepolia.etherscan.io/address/0x0128Ac6B5E3364b022e55A0cf9c0cb4987B3B20f) |
 
@@ -23,12 +23,17 @@ The maker's inventory, opened through the Uniswap API and owned by the vault:
 |---|---|
 | Position | v4 NFT [`#37804`](https://sepolia.etherscan.io/token/0x429ba70129df741B2Ca2a85BC3A2a3328e5c09b4?a=37804), full range, 100,000 of each token |
 | Pool | `0x25f7dd131e5548b22a4bf9b95587514d69960261c1defff0ec465f9f90d54489`, fee 3000, spacing 60, no hook |
-| Reachable per fill | 23,503 tokens, which is 25% of the position after a 5% haircut |
-| Aqua strategy | `0x9f853f6da4f2ad117c0a19545466e28be0343bf17f4d07067ffbcfa55d6e9da3` |
+| Reachable per fill | 21,453.97 bALPHA, which is 25% of the position after a 5% haircut. `getEffectiveLiquidity` reports the same figure on that side and 26,535.12 bBRAVO on the other, because the pool no longer sits at parity |
+| Aqua strategy | `0x5558177a9c2fafbf360d32c575576bac9cd7603b1d52c91821b0a08fe9015207` |
 | Program | `[0x92 unwind][0x51 concentrate][0x02 salt]`, 142 bytes, the curve bounded by the position's own range |
 
-The vault was redeployed once the position existed, because `TOKEN_ID` is immutable and the first deployment
-predated the pool. That is the whole reason the address above differs from the one in the deploy transaction.
+The vault has been deployed three times, and both redeployments are for the same reason: what a taker needs
+to be able to read off an immutable maker cannot live behind a setter. The first was constructed before the
+position existed, so `TOKEN_ID` was zero. The second, `0xE703F509ba1bF70BcFa4957a7090e73B627dE76a`, could not
+read the pool price, which the conservation guard needs to value what a withdrawal released, so `STATE_VIEW`
+joined the immutables. The position NFT moved across in
+[`0xa2516a9a…`](https://sepolia.etherscan.io/tx/0xa2516a9a7ccca1a9bf06f80aa952e0f45b5f263db21af14788e3d0835d5dbfab),
+the float followed, and the book was re-shipped from the new maker.
 
 The router's `AQUA()` getter returns `0x499943E74FB0cE105688beeE8Ef2ABec5D936d31`, the canonical Aqua address, which is the one line that
 proves the official contracts are the ones doing the work. Its `OPCODE_UNWIND_PRICED_BALANCE_OUT()` returns
@@ -233,7 +238,7 @@ See [FEEDBACK.md](FEEDBACK.md) for what we found while integrating.
 yarn install
 cp .env.example .env          # fill UNISWAP_API_KEY and DEPLOYER_PRIVATE_KEY
 yarn gate0                    # six checks that decide whether the project exists
-yarn test                     # 19 tests, no network needed
+yarn test                     # 48 tests, no network needed
 forge script contracts/script/Deploy.s.sol --rpc-url sepolia --broadcast --verify
 yarn setup                    # pool, position, vault custody, all through the LP API
 yarn aqua                     # opens the strategy the book quotes
@@ -279,14 +284,18 @@ for a program Aqua has never seen, ships that one from the vault with the same b
 parameters, and leaves the taker approved. Nothing else moves: same pool, same position, same vault, same
 router, one byte of difference in a no-op instruction.
 
-| Latest fill on Sepolia | [`0x2d06c096…`](https://sepolia.etherscan.io/tx/0x2d06c09613389cdd2260213d302a3ae3a2875c71e986b310595a3592adaafb55) |
+| Latest fill on Sepolia | [`0xfa8e60eb…`](https://sepolia.etherscan.io/tx/0xfa8e60eb930b9617455ceeaf36b23bb788532738d1944358c5d5ee59d7a8a704) |
 |---|---|
 | Program | `0x92` unwind, `0x51` concentrate bounded by the position, `0x02` salt |
-| Swapped | 1,000 bBRAVO in, 879.312663104099977232 bALPHA out |
-| Unwind | 1% of the position, released 921.42 bALPHA against 879.31 owed, surplus kept as float |
-| Redeposit | liquidity back from 101,448.88 to 101,495.78 in the same transaction |
-| Gas | 343,942 |
-| Taker | `0xF29bCE83AF15acC7AdaaeaC34A5BE9165C52b4d0`, a wallet that funded itself through the public `mint` |
+| Swapped | 1,000 bBRAVO in, 912.676854023977327256 bALPHA out |
+| Unwind | 2% of the position, released 1,806.65 bALPHA and 2,234.54 bBRAVO against 912.68 owed, all of it into the vault, which is what guard 5 now checks |
+| Redeposit | liquidity back from 98,452.54 to 99,446.80 in the same transaction |
+| Gas | 340,599, against 343,942 before the guard, because the fill sizes its own unwind |
+| Taker | the deployer on this run; the dashboard fills from whatever wallet is connected, and the guards do not care which |
+
+That fill is the first one to run against all five guards, and it costs no more than the four did. The two
+extra reads the conservation guard makes, `getPoolAndPositionInfo` and `getSlot0`, are worth about 15,000 gas
+on a fill that already carries two PositionManager calls.
 
 That taker is not the deployer and holds nothing but what it minted itself, which is the point of the two
 buttons on the dashboard: the fill is signed by whoever is connected, and the maker's guards do not care who
