@@ -3,7 +3,7 @@ import { encodeAbiParameters, keccak256, type Address, type Hex } from 'viem'
 import { aquaAbi, erc20Abi, positionManagerAbi, routerAbi, stateViewAbi, vaultAbi } from './abi'
 import { publicClient } from './client'
 import { declaredTokenId, strategyHashes, type AppConfig } from './config'
-import { ok, reason, short, unavailable, type Result } from './format'
+import { ok, reason, shortAddress, unavailable, type Result } from './format'
 
 export interface PoolKey {
   currency0: Address
@@ -112,7 +112,7 @@ export function poolIdOf(key: PoolKey): Hex {
 export function tokenOf(snapshot: Snapshot, address: Address): { symbol: string; decimals: number } {
   const meta = address.toLowerCase() === snapshot.tokenA.address.toLowerCase() ? snapshot.tokenA : snapshot.tokenB
   return {
-    symbol: meta.symbol.ok ? meta.symbol.value : short(meta.address),
+    symbol: meta.symbol.ok ? meta.symbol.value : shortAddress(meta.address),
     decimals: meta.decimals.ok ? meta.decimals.value : 18,
   }
 }

@@ -20,35 +20,77 @@ export const addressUrl = (address: string) => `${EXPLORER}/address/${address}`
 export const txUrl = (hash: string) => `${EXPLORER}/tx/${hash}`
 export const tokenUrl = (address: string) => `${EXPLORER}/token/${address}`
 
-export function short(value: string, head = 6, tail = 4): string {
-  if (value.length <= head + tail + 2) return value
-  return `${value.slice(0, head)}…${value.slice(-tail)}`
+/**
+ * One numeric rule, applied everywhere.
+ *
+ * A narrow no-break space groups the thousands: narrow because a comma reads badly next to hex, no-break
+ * because a wrapped number is unreadable and the columns here are narrow enough for it to happen.
+ */
+const GROUP = '\u202f'
+/** Fixed, so every column of numbers on the page has its decimal point in the same place. */
+export const DECIMALS_SHOWN = 2
+
+function group(digits: string): string {
+  return digits.replace(/\B(?=(\d{3})+(?!\d))/g, GROUP)
 }
 
-/** Fixed point with a thin space every three digits, so long balances stay readable at a glance. */
-export function amount(value: bigint, decimals = 18, precision = 4): string {
+/**
+ * A token amount, truncated rather than rounded, so a figure on screen is never larger than the chain's.
+ *
+ * A non zero amount that would print as zero is shown as a bound instead, because "0.00" next to a balance
+ * that exists is a lie and dust is a real state on a testnet.
+ */
+export function amount(value: bigint, decimals = 18, places = DECIMALS_SHOWN): string {
+  const negative = value < 0n
+  const magnitude = negative ? -value : value
+  const sign = negative ? '-' : ''
+  const scale = 10n ** BigInt(decimals)
+  const factor = 10n ** BigInt(places)
+  const scaled = (magnitude * factor) / scale
+  if (magnitude > 0n && scaled === 0n) return `${sign}<${GROUP}0.${'0'.repeat(Math.max(0, places - 1))}1`
+  const whole = group((scaled / factor).toString())
+  if (places === 0) return `${sign}${whole}`
+  return `${sign}${whole}.${(scaled % factor).toString().padStart(places, '0')}`
+}
+
+/** The same amount at full precision, for the places where the exact figure is the point. */
+export function exact(value: bigint, decimals = 18): string {
   const raw = formatUnits(value, decimals)
-  const [whole, fraction = ''] = raw.split('.')
-  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ' ')
-  if (precision === 0) return grouped
-  const trimmed = fraction.slice(0, precision).replace(/0+$/, '')
-  return trimmed ? `${grouped}.${trimmed}` : grouped
+  const [whole, fraction] = raw.split('.')
+  return fraction ? `${group(whole)}.${fraction}` : group(whole)
 }
 
-/** Raw integers, grouped. Used for liquidity, which is not denominated in a token. */
+/** Raw integers, grouped. Used for liquidity and block numbers, which are not denominated in a token. */
 export function integer(value: bigint | number): string {
-  return value.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ')
+  return group(value.toString())
 }
 
 export function bps(value: number): string {
   return `${value} bps, ${(value / 100).toFixed(2)} percent`
 }
 
-export function ago(timestamp: number): string {
-  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000))
+export function ago(timestamp: number, now = Date.now()): string {
+  const seconds = Math.max(0, Math.round((now - timestamp) / 1000))
   if (seconds < 60) return `${seconds}s ago`
   const minutes = Math.floor(seconds / 60)
-  return `${minutes}m ${seconds % 60}s ago`
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s ago`
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m ago`
+}
+
+/**
+ * Two truncation rules and no third one.
+ *
+ * An address is 20 bytes and a hash is 32, and telling them apart at a glance is worth more than saving four
+ * characters, so they are cut to different lengths. Every call site uses one of these two.
+ */
+export function shortAddress(value: string): string {
+  if (value.length <= 12) return value
+  return `${value.slice(0, 6)}…${value.slice(-4)}`
+}
+
+export function shortHash(value: string): string {
+  if (value.length <= 20) return value
+  return `${value.slice(0, 10)}…${value.slice(-8)}`
 }
 
 export function isAddress(value: unknown): value is Address {
