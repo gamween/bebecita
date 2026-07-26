@@ -25,8 +25,8 @@ just in time, atomically".
 git clone git@github.com:gamween/bebecita.git && cd bebecita
 yarn install
 cp .env.example .env          # ask Fianso for the API key, generate your own deployer key
-yarn test                     # 11 tests, no network, should be green in 13 seconds
-yarn gate0                    # five live checks against Sepolia and the Uniswap API
+yarn test                     # 48 tests in three suites, no network, green in under a minute
+yarn gate0                    # six live checks against Sepolia and the Uniswap API
 ```
 
 ## The one rule that will save you an hour
@@ -38,8 +38,12 @@ estimated.
 forge build --skip test                                  # 17 s
 forge test --match-path contracts/test/Bebecita.t.sol    # 13 s
 forge build                                              # 3 min 49, avoid
-npm run snapshot                                         # starts with a clean, never run this
+forge test                                               # 3 min 49, avoid, and yarn test does not do this
 ```
+
+`yarn test` is the three suites run one `--match-path` at a time on purpose, which is why it is safe. There is
+no gas snapshot script in this repository: `forge snapshot` starts with a clean build and pays the same four
+minutes, so it was never wired up.
 
 ## Where things are
 
@@ -60,6 +64,9 @@ npm run snapshot                                         # starts with a clean, 
 | `solver/src/strategy.ts` | Rebuilds the live order from what `yarn aqua` recorded and refuses to continue unless the hash matches. |
 | `solver/src/fill.ts` | `yarn fill`. The terminal half of `fillPlan`: a private key, the broadcast, and the receipt check. |
 | `solver/src/reset.ts` | `yarn demo:reset`. Walks the salt space and re-ships, so the demo is replayable. |
+| `solver/src/rebalance.ts` | `yarn rebalance`. Trades the accumulated float home and puts both sides back in the position. Required before a demo, see `docs/DEMO.md`. |
+| `solver/src/inventory.ts` | `yarn inventory`. What every fill did to the maker's inventory, read off the receipts. Read only. |
+| `solver/src/negativeMoment.ts` | `yarn negative-moment`. Ships the same book without `0x92`, on our router. Read its header comment before touching the demo script. |
 | `app/src/lib/fill.ts` | The browser half of `fillPlan`: the connected wallet, the two API calls through the proxy, mint and approve. |
 | `contracts/script/Fill.s.sol` | The Solidity reference the traits port is diffed against. Not on the fill path. Read the header comment before touching it. |
 
@@ -96,8 +103,10 @@ silently changes the whole hook ordering.
 **Taker traits reverts do not look like decoding reverts.** The 22 byte header is ten running sums over the
 slices behind it, so a header that is off by one byte does not fail to decode, it decodes a different slice.
 The VM then prices against garbage and the revert reads `TakerTraitsAmountOutMustBeGreaterThanZero`, which
-points at the amount. That is why the fill builds its traits in Solidity with `TakerTraitsLib.build` rather
-than reproducing the arithmetic in TypeScript.
+points at the amount. The fill builds its traits in TypeScript, in `solver/src/takerTraits.ts`, because
+`TakerTraitsLib.build` is `internal pure` and cannot run in a browser. That silent failure mode is why the port
+is proved rather than trusted: `contracts/test/TakerTraits.t.sol` calls the sponsor's library on twelve
+argument shapes and asserts byte equality. Never edit the port without running that suite.
 
 **The vault's first guard is a delta, not a level.** `preTransferOut` requires `outAfter >= outBefore +
 amountOut`, so float already sitting in the vault does not count towards it and the withdrawal alone has to
