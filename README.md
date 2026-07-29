@@ -413,8 +413,10 @@ page 4: the total liquidity provisioned across every strategy this vault has shi
 backing it. It is shown twice, because the denominator is the whole argument. Against the vault's plain ERC20
 balances it is in the hundreds, and undefined when the float is zero, which is what a wallet balance check
 sees. Against free float plus `reachableFromPosition()`, the figure instruction `0x92` clamps to on chain, it
-is finite. Every strategy hash comes from the vault's own `Shipped` events, not from the deployment record,
-which only ever names the live one.
+is finite. The strategy hashes come from the vault's own `Shipped` events, scanned back over about 45 000
+blocks on a minute long loop of its own, merged with the one `deployments/sepolia.json` names so that a
+strategy shipped before that window is still counted. The record only ever names the live one, which is why
+the scan is what the sum is built from.
 
 Iteration discipline, measured on the build machine: a full `forge build` costs **3 min 49** because of `via_ir`, `forge build --skip test` costs **17 s**, and `forge test --match-path <one file>` costs **13 s**. Never run the bare commands.
 
