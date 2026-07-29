@@ -1,0 +1,14 @@
+# Canonical identities, so `git log` and `git shortlog -sn` name the two people who built this
+# rather than the four identities their machines happened to be configured with.
+#
+# This does not change GitHub's contributor graph, which keys off the commit email and the account
+# it is registered to. Sanka committed under a local machine default, so the README credits him
+# explicitly instead.
+
+Sofiane Ben Taleb <gamween@gmail.com>
+Sofiane Ben Taleb <gamween@gmail.com> <sofiane@Mac.home>
+Sofiane Ben Taleb <gamween@gmail.com> Sofiane <gamween@gmail.com>
+Sofiane Ben Taleb <gamween@gmail.com> Sofiane (Zidane) Ben Taleb <gamween@gmail.com>
+
+Sankara Wigneswaran <sanka@Mac.home>
+Sankara Wigneswaran <sanka@Mac.home> Sanka <sanka@Mac.home>
