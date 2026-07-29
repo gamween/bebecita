@@ -4,10 +4,13 @@ This file was written before the build and is kept as the record of what was pla
 report. Where a task shipped differently from the plan, or did not ship at all, that is written under the task
 rather than edited out of it.
 
-Status as of **2026-07-26**: the contracts are deployed and verified on Ethereum Sepolia, gate zero is green,
-48 tests pass in three suites, 75 commits on `main` across 20 merged pull requests. Those two counts are exact
-at that date; `git rev-list --count origin/main` and `gh pr list --state merged --limit 100 --json number --jq
-'length'` re-derive them. T1, T2, T3, T4, T6, T7 and T8 shipped. T5 did not, and the reason is under T5.
+Status as of **2026-07-29**: the contracts are deployed and verified on Ethereum Sepolia, gate zero is green,
+53 tests pass in three suites. Every task shipped. T5 shipped last and after the event, which is written under
+T5 along with the part of its original rationale that turned out to be wrong.
+
+The repository's own counts are deliberately not frozen here. `git rev-list --count origin/main` and `gh pr
+list --state merged --limit 100 --json number --jq 'length'` answer for the commits and the pull requests, and
+a number copied into a file that itself lands through a pull request is wrong the moment it lands.
 
 Every task ships on its own branch, through a pull request, reviewed before merge. No direct commits to
 `main`.
@@ -16,7 +19,7 @@ Every task ships on its own branch, through a pull request, reviewed before merg
 
 ```
 T1 pool and position  ──┐
-                        ├──> T3 fill orchestrator ──> T5 two fills in one transaction  (not built)
+                        ├──> T3 fill orchestrator ──> T5 two fills in one transaction
 T2 frontend         ────┘                        └──> T6 dashboard and SLAC
 T4 concentrate curve ───────────────────────────────┘
 T7 docs and demo ──────────────────────────────────────────────> T8 final review
@@ -87,15 +90,56 @@ becomes the range of the position funding it.
 Acceptance: a fill larger than the reachable collateral returns an exact partial rather than reverting, proven
 by a test.
 
-## T5. Two fills in one transaction, `feat/two-fills`. Not built.
+## T5. Two fills in one transaction, `feat/close-last-plan-task`. Shipped after the event.
 
 Planned: a taker contract calling `swap()` twice, on two strategy hashes of the same maker, both backed by the
 same position. Legal because the reentrancy guard is keyed by order hash rather than global, and the second
 `runLoop` would read a balance already reduced by the first pull.
 
-It was not built, and nothing partial was left behind. There is no taker contract in `contracts/src/`, and no
-transaction on the router carries two `Swapped` events. Checked rather than remembered: every `Swapped` the
-router has ever emitted, seventeen of them, sits in its own transaction.
+Why it was dropped at the time, plainly. It was the best ten seconds available on stage and it was ranked
+below the work that closed a real security hole. The audit that produced guard five landed in the same window:
+the first four guards let a taker unwind the whole per fill cap, hand the vault exactly what the fill owed and
+keep the rest of both tokens, and repeating that with dust sized fills drained the position with every guard
+green. Building a second taker to make the demo louder while that was open would have been the wrong trade. A
+judge who asks what got cut should be told this, because the answer is the better story.
+
+That ranking still reads correctly. The second reason written here, that T5 was theatre with no new mechanism
+because the reentrancy guard is the sponsor's property, does not. The guard keying is what makes the
+arrangement legal, and legality is not the experiment. The experiment is that Aqua reads a maker's balances
+per order hash, so two strategies against one position are two promises with nothing relating them, and
+instruction `0x92` is the only thing in the transaction that relates them. That is this project's mechanism
+and nobody else's, and it was never executed against more than one fill at a time.
+
+So it is built. `contracts/src/takers/BebecitaTaker.sol` is the taker, and it does two different things
+because they are two different experiments. `fillAll` runs fills back to back. The `preTransferOutCallback`
+path runs the second fill inside the first, in the window `SwapVM.sol:316-319` opens between the maker's
+`preTransferOut` hook and `AQUA.pull`, which is the shape that actually needs the guard to be keyed by order
+hash. Five tests in `contracts/test/Bebecita.t.sol` cover it, and the suite went from 48 to 53.
+
+What they establish, in the order they were worth writing:
+
+- Back to back, the second fill is paid exactly what the first one left. On the test position of 1,000
+  liquidity the first fill is clamped to 475, unwinds the whole 500 cap, redeposits the 25 of surplus, and the
+  second fill is then clamped to 249.375, which is `_reachable(525)` to the wei. Both strategies were shipped
+  10,000 of virtual balance, so Aqua would have honoured either one of them alone.
+- The per fill cap measures the position as it stands rather than as it was. Guard 3 reads liquidity at hook
+  entry, so unwinding `maxUnwindPct` twice takes half and then half of the remainder, and iterating inside one
+  transaction never reaches the whole position.
+- Nested, both fills settle, and the log order proves the nesting: two `Swapped` events out of one call with
+  the inner order's first.
+- And the one interaction composition actually creates, which is the reason this was worth building rather
+  than staging. `0x92` adds the maker's free float to the reachable share of the position, and inside the
+  settlement window that float is the outer fill's own unwind, sitting in the vault because `AQUA.pull` has
+  not run yet. So the inner fill is quoted 737.5 where its own share of the position is worth 237.5. Neither
+  the reentrancy guard nor the cap stops a taker from asking for all of it: the inner unwind in that test is
+  exactly `maxUnwindPct` of what is left. Guard 1 stops it, because it is a delta and not a level. It requires
+  the payload to raise the maker's balance by the whole `amountOut`, so tokens that were already there when
+  the hook started cannot fund a second payout. The transaction reverts, the maker pays nothing, and the taker
+  pays the gas.
+
+What is not claimed. This shipped as contracts and tests, against `MockPositionManager`, and nothing new was
+sent to Sepolia for it. Every `Swapped` the deployed router has ever emitted, seventeen of them, still sits in
+its own transaction, and the command below is how that is checked rather than remembered.
 
 ```bash
 cast logs --from-block 0 --to-block latest \
@@ -103,17 +147,6 @@ cast logs --from-block 0 --to-block latest \
   0x54bc5c027d15d7aa8ae083f994ab4411d2f223291672ecd3a344f3d92dcaf8b2 \
   --rpc-url <an archive Sepolia endpoint>
 ```
-
-Why it was dropped, plainly. It was the best ten seconds available on stage and it was ranked below the work
-that closed a real security hole. The audit that produced guard five landed in the same window: the first four
-guards let a taker unwind the whole per fill cap, hand the vault exactly what the fill owed and keep the rest
-of both tokens, and repeating that with dust sized fills drained the position with every guard green. Building
-a second taker to make the demo louder while that was open would have been the wrong trade. A judge who asks
-what got cut should be told this, because the answer is the better story.
-
-The compounding reason: T5 is theatre with no new mechanism in it. The reentrancy guard being keyed by order
-hash is the sponsor's property, not ours, and demonstrating it would have proved nothing about the instruction
-this project exists for.
 
 ## T6. Dashboard and SLAC, `feat/dashboard`
 
