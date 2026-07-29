@@ -68,10 +68,11 @@ const DEPOSIT = 100_000n * 10n ** 18n
 /** ERC721 and ERC20 share this topic0. Only the topic count tells them apart. */
 const TRANSFER_TOPIC = toEventSelector('Transfer(address,address,uint256)')
 
+// `nextTokenId` is deliberately absent: the tokenId is read back from the mint receipt, for the reason the
+// header gives.
 const posmAbi = parseAbi([
   'function getPositionLiquidity(uint256 tokenId) view returns (uint128)',
   'function ownerOf(uint256 tokenId) view returns (address)',
-  'function nextTokenId() view returns (uint256)',
   'function safeTransferFrom(address from, address to, uint256 tokenId)',
 ])
 
@@ -79,7 +80,6 @@ const vaultAbi = parseAbi([
   'function approve(address token, address spender, uint256 amount)',
   'function approveViaPermit2(address permit2, address token, address spender, uint160 amount, uint48 expiration)',
   'function TOKEN_ID() view returns (uint256)',
-  'function OWNER() view returns (address)',
 ])
 
 const erc20ApproveAbi = parseAbi(['function approve(address spender, uint256 amount)'])
