@@ -49,7 +49,6 @@ export interface Slac {
   reachable: SlacLeg
 }
 
-const WAD = 10n ** 18n
 /** Six decimals of ratio, which is more than any of these numbers deserves and keeps the bigint math exact. */
 const SCALE = 1_000_000n
 
@@ -111,9 +110,6 @@ export function slacOf(snapshot: Snapshot | null): Slac {
 
   return { numerator, bare, reachable }
 }
-
-/** Whole tokens, from an 18 decimal sum, for the two denominators and the numerator alike. */
-export const tokens = (value: bigint): number => Number((value * SCALE) / WAD) / Number(SCALE)
 
 /**
  * A ratio, rendered at a precision that matches its size. A SLAC of 227 does not need four decimals and a

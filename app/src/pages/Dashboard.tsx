@@ -28,19 +28,30 @@ import {
   ok,
   reason,
   shortAddress,
+  shortHash,
   unavailable,
   type Result,
 } from '../lib/format'
+import { readHistory, settled, type History } from '../lib/history'
 import { lastRateLimitRemaining, netlog } from '../lib/netlog'
 import { orderFrom, requestQuote, type QuoteResult } from '../lib/quote'
 import { NOT_READ_YET, readinessOf } from '../lib/readiness'
 import { readFillReceipt, type FillReceipt } from '../lib/receipt'
+import { ratio, slacOf, type SlacLeg, type SlacNumerator } from '../lib/slac'
 import { readSnapshot, tokenOf, type Snapshot } from '../lib/state'
 import { txIdle, useTx, type TxState } from '../lib/tx'
 import { claimFees, findTransactionRequest, poolInfo, type TransactionRequest } from '../lib/uniswap'
 
 const MINT_AMOUNT = 10_000n * 10n ** 18n
 const STATE_POLL_MS = 5_000
+/**
+ * The log scan is on its own timer, and a slow one.
+ *
+ * It costs five `eth_getLogs` against a capped public endpoint, and what it answers changes once per
+ * `yarn demo:reset`, so putting it on the state poll would have spent the endpoint's budget re-reading a list
+ * that had not moved. A minute is well under the time it takes anybody to ship a second strategy by hand.
+ */
+const HISTORY_POLL_MS = 60_000
 /** Said by the disabled reason and by the click handler both, so the tooltip and the error card cannot disagree. */
 const NO_ROUTER = 'The deployment record carries no router address, so there is nothing to quote against.'
 /** The Uniswap key allows six requests a second. One pool_info per press of Refresh, never on the timer. */
@@ -95,6 +106,89 @@ function ResultPanel({
       {state.status === 'error' ? <div className="failure mono">{state.message}</div> : null}
       {state.status === 'ok' ? children : null}
     </Panel>
+  )
+}
+
+/** One of the two numbers the page opens on, in the display size the strip below it does not get. */
+function Figure({
+  label,
+  note,
+  children,
+  sub,
+}: {
+  label: string
+  note: string
+  children: React.ReactNode
+  sub?: React.ReactNode
+}) {
+  return (
+    <div className="figure">
+      <div className="figure-label">
+        {label}
+        <span className="note">{note}</span>
+      </div>
+      <div className="figure-value">{children}</div>
+      {sub ? <div className="figure-sub">{sub}</div> : null}
+    </div>
+  )
+}
+
+/**
+ * One reading of the SLAC, with the two figures it was divided from underneath it.
+ *
+ * The ratio is the headline and the fraction is the receipt. Neither number is worth anything on its own here,
+ * because the argument is entirely about which denominator was used, so the card names that too.
+ */
+function SlacCard({
+  title,
+  denominator,
+  numerator,
+  leg,
+  strategies,
+}: {
+  title: string
+  denominator: string
+  numerator: Result<SlacNumerator>
+  leg: SlacLeg
+  strategies: number
+}) {
+  return (
+    <div className="slac-card">
+      <div className="slac-title">{title}</div>
+      <div className="slac-value">
+        <Show result={leg.ratio}>{(value) => <span className="num">{ratio(value)}</span>}</Show>
+      </div>
+      <dl className="kv slac-kv">
+        <dt>provisioned</dt>
+        <dd>
+          {numerator.ok ? (
+            <>
+              {/* The same truncation the strategy list below prints its subtotals with, so they agree. */}
+              {fmtAmount(numerator.value.total, 18, 0)}
+              <span className="unit">
+                tokens over {strategies} {strategies === 1 ? 'strategy' : 'strategies'}
+                {numerator.value.missing ? `, ${numerator.value.missing} balance unread` : ''}
+              </span>
+            </>
+          ) : (
+            <Missing reason={numerator.reason} />
+          )}
+        </dd>
+        <dt>equity</dt>
+        <dd>
+          {leg.denominator.ok ? (
+            <>
+              {fmtAmount(leg.denominator.value, 18, 0)}
+              <span className="unit">tokens</span>
+            </>
+          ) : (
+            <Missing reason={leg.denominator.reason} />
+          )}
+        </dd>
+        <dt>denominator</dt>
+        <dd className="faint">{denominator}</dd>
+      </dl>
+    </div>
   )
 }
 
@@ -284,6 +378,8 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
 
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [snapshotError, setSnapshotError] = useState<string | null>(null)
+  const [history, setHistory] = useState<History | null>(null)
+  const [historyError, setHistoryError] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const [amountInput, setAmountInput] = useState('1000')
   const [aToB, setAToB] = useState(true)
@@ -303,6 +399,8 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
   const poolInfoAt = useRef(0)
   /** Every snapshot read takes a number, and only the newest one is allowed to write what it read. */
   const refreshSeq = useRef(0)
+  /** Read by `refresh`, which must not re-identify when the scan lands or the five second poll would restart. */
+  const historyRef = useRef<History | null>(null)
 
   /**
    * Reads the chain, and on a press also asks the Uniswap API about the pool.
@@ -317,7 +415,10 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
       const seq = ++refreshSeq.current
       if (options.pressed) setRefreshing(true)
       try {
-        const next = await readSnapshot(config, [])
+        // Every strategy the vault has ever shipped, so the SLAC above is a sum over all of them rather than
+        // over the one the deployment record happens to name. The record only ever names the live one.
+        const shipped = historyRef.current?.strategies.map((strategy) => strategy.hash) ?? []
+        const next = await readSnapshot(config, shipped)
         // A poll that left before a fill was confirmed can answer after the refresh that fill asked for, and it
         // would put pre-fill numbers back on the screen a second after the settled ones arrived. A read that has
         // been overtaken is dropped instead.
@@ -355,6 +456,41 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
     const interval = setInterval(() => void refresh(), STATE_POLL_MS)
     return () => clearInterval(interval)
   }, [refresh])
+
+  const refreshRef = useRef(refresh)
+  refreshRef.current = refresh
+
+  /**
+   * The vault's own logs: which strategies it has shipped, and what has settled through them.
+   *
+   * A scan that finds a hash the last snapshot did not know about re-reads the snapshot straight away, because
+   * the balances behind that hash are what the SLAC numerator sums. A scan that finds the same list as last
+   * time does nothing, which is the ordinary case once the page has been open a minute.
+   */
+  const scanHistory = useCallback(async () => {
+    const vault = config?.deployment.vault
+    const router = config?.deployment.router
+    if (!vault || !router) return
+    const before = (historyRef.current?.strategies ?? []).map((strategy) => strategy.hash.toLowerCase()).join()
+    try {
+      const next = await readHistory({ vault, router })
+      historyRef.current = next
+      setHistory(next)
+      // `readHistory` keeps whatever it read before a chunk failed, so a partial scan is a result with a reason
+      // attached rather than an error, and the figures it did find still go on screen.
+      setHistoryError(next.error)
+      const after = next.strategies.map((strategy) => strategy.hash.toLowerCase()).join()
+      if (after !== before) await refreshRef.current()
+    } catch (error) {
+      setHistoryError(reason(error))
+    }
+  }, [config])
+
+  useEffect(() => {
+    void scanHistory()
+    const interval = setInterval(() => void scanHistory(), HISTORY_POLL_MS)
+    return () => clearInterval(interval)
+  }, [scanHistory])
 
   const token0 = snapshot?.vault.keyUsed.currency0 ?? null
   const token1 = snapshot?.vault.keyUsed.currency1 ?? null
@@ -463,6 +599,63 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
   }, [approveReset, executeReset, mintReset, takerAddress])
 
   const readiness = useMemo(() => readinessOf(snapshot, snapshotError), [snapshot, snapshotError])
+
+  const slac = useMemo(() => slacOf(snapshot), [snapshot])
+
+  /**
+   * Settled volume, per input token, so a two directional book is never summed into one wrong number.
+   *
+   * Derived from the logs alone. The token metadata comes from the snapshot when it has arrived and from the
+   * address itself when it has not, because the volume is a fact about the chain either way.
+   */
+  const volume = useMemo(() => {
+    if (!history) return null
+    const paidIn = new Map<string, bigint>()
+    const paidOut = new Map<string, bigint>()
+    for (const entry of history.fills) {
+      paidIn.set(entry.tokenIn, (paidIn.get(entry.tokenIn) ?? 0n) + entry.amountIn)
+      paidOut.set(entry.tokenOut, (paidOut.get(entry.tokenOut) ?? 0n) + entry.amountOut)
+    }
+    const legs = (totals: Map<string, bigint>) =>
+      [...totals.entries()].map(([token, value]) => ({
+        token: token as Address,
+        value,
+        symbol: snapshot ? tokenOf(snapshot, token as Address).symbol : shortAddress(token),
+        decimals: snapshot ? tokenOf(snapshot, token as Address).decimals : 18,
+      }))
+    return { count: settled(history.fills).count, in: legs(paidIn), out: legs(paidOut) }
+  }, [history, snapshot])
+
+  /** The two floats as one figure, and the reason if either side of the addition is missing. */
+  const float: Result<bigint> = useMemo(() => {
+    if (!snapshot) return notRead
+    if (!snapshot.vault.floatA.ok) return snapshot.vault.floatA
+    if (!snapshot.vault.floatB.ok) return snapshot.vault.floatB
+    return ok(snapshot.vault.floatA.value + snapshot.vault.floatB.value)
+  }, [snapshot])
+
+  /** Where each strategy came from, and what has settled on it, keyed by hash. */
+  const strategyMeta = useMemo(() => {
+    const map = new Map<string, { blockNumber: bigint; txHash: Hex; fills: number }>()
+    for (const strategy of history?.strategies ?? []) {
+      map.set(strategy.hash.toLowerCase(), { blockNumber: strategy.blockNumber, txHash: strategy.txHash, fills: 0 })
+    }
+    for (const entry of history?.fills ?? []) {
+      const meta = map.get(entry.orderHash.toLowerCase())
+      if (meta) meta.fills += 1
+    }
+    return map
+  }, [history])
+
+  const liveStrategyHash = config?.deployment.strategy?.orderHash ?? config?.deployment.strategyHash ?? null
+  /**
+   * Whether the scan actually read a block range.
+   *
+   * A scan whose very first chunk is refused still returns a `History`, with no fills, no strategies and the
+   * reason attached. Reading that as an answer would have printed "no fill in the scanned window" over a window
+   * nobody scanned, which is the one thing this page is not allowed to do.
+   */
+  const scanned = Boolean(history && history.chunks > 0)
 
   const netEntries = useSyncExternalStore(netlog.subscribe, netlog.snapshot)
   const netRemaining = lastRateLimitRemaining(netEntries)
@@ -848,6 +1041,106 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
             </span>
           </div>
         </div>
+
+        {/*
+         * The claim, above the controls rather than under them.
+         *
+         * What has settled through this maker, next to the wallet balance that was standing behind it, and then
+         * the same comparison written as the ratio 1inch defines. A visitor who reads nothing else on this page
+         * should still leave having seen those two numbers together.
+         */}
+        <section className="headline" aria-label="Shared liquidity">
+          <Figure
+            label="settled through this maker"
+            note="Swapped events on the router, summed per input token"
+            sub={
+              volume && scanned
+                ? `${volume.count} ${volume.count === 1 ? 'fill' : 'fills'}, paid back out: ${
+                    volume.out.map((leg) => `${fmtAmount(leg.value, leg.decimals)} ${leg.symbol}`).join(', ') ||
+                    'nothing yet'
+                  }`
+                : // A scan that read nothing has no summary to give, and the value above it already says why.
+                  history
+                  ? ''
+                  : 'reading the logs'
+            }
+          >
+            {volume && volume.in.length ? (
+              volume.in.map((leg) => (
+                <div key={leg.token}>
+                  <Num>{fmtAmount(leg.value, leg.decimals)}</Num> <Unit>{leg.symbol}</Unit>
+                </div>
+              ))
+            ) : history && scanned ? (
+              <>
+                <span className="unavailable">no fill in the scanned window</span>
+                <span className="why">
+                  scanned back to block {integer(history.scannedFrom)} over {history.chunks} range
+                  {history.chunks === 1 ? '' : 's'}
+                </span>
+              </>
+            ) : (
+              <Missing reason={historyError ?? NOT_READ_YET} />
+            )}
+          </Figure>
+
+          <Figure
+            label="the float that backed it"
+            note="balanceOf the vault, both tokens, right now"
+            sub={
+              snapshot?.vault.floatA.ok && snapshot.vault.floatB.ok
+                ? `${fmtAmount(snapshot.vault.floatA.value, decimalsA)} ${symbolA}, ${fmtAmount(snapshot.vault.floatB.value, decimalsB)} ${symbolB}`
+                : ''
+            }
+          >
+            <Show result={float}>
+              {(value) => (
+                <>
+                  <Num>{fmtAmount(value)}</Num> <Unit>tokens</Unit>
+                </>
+              )}
+            </Show>
+          </Figure>
+
+          <div className="headline-note">
+            The number on the right is what a wallet balance check sees. The volume on the left went through that
+            same wallet anyway, because the inventory sits in a Uniswap v4 position and is unwound one instruction
+            before the tokens leave, inside the transaction that pays them out.
+          </div>
+        </section>
+
+        <Panel
+          accent="aqua"
+          title="SLAC"
+          note="the Shared Liquidity Amplification Coefficient, 1inch's own metric, Aqua whitepaper page 4: total liquidity provisioned across all strategies over the wallet equity backing it"
+          foot={
+            <p className="prose">
+              The second denominator is what the custom instruction measures on chain. reachableFromPosition() is
+              the position's liquidity valued at the maker's own conversion factor, capped at maxUnwindPct and cut
+              by the haircut, and instruction 0x92 clamps every quote to the free float plus that figure inside the
+              VM. The first denominator is the one a wallet balance check would use, which is why it reads as
+              amplification that cannot exist: the inventory it is looking for is deployed, not missing. It is
+              undefined rather than infinite when the float is zero, and the card says so.
+            </p>
+          }
+        >
+          <div className="slac-grid">
+            <SlacCard
+              title="against bare wallet equity"
+              denominator="ERC20 balanceOf on the vault, both tokens"
+              numerator={slac.numerator}
+              leg={slac.bare}
+              strategies={snapshot?.aqua.strategies.length ?? 0}
+            />
+            <SlacCard
+              title="against reachable equity"
+              denominator="free float plus vault.reachableFromPosition(), counted once"
+              numerator={slac.numerator}
+              leg={slac.reachable}
+              strategies={snapshot?.aqua.strategies.length ?? 0}
+            />
+          </div>
+        </Panel>
 
         <section className="trade-card" aria-labelledby="trade-title">
           <div className="trade-card-head">
@@ -1328,6 +1621,95 @@ export function Dashboard({ config }: { config: AppConfig | null }) {
             <Field label="app" note="the router the strategies were shipped to">
               {snapshot?.aqua.app ? <Addr value={snapshot.aqua.app} /> : <Missing reason={NOT_READ_YET} />}
             </Field>
+
+            {/* The balances the SLAC numerator adds up, one row each, so the ratio above can be checked. */}
+            <Subhead
+              note={
+                history && scanned
+                  ? `Shipped events on the vault, blocks ${integer(history.scannedFrom)} to ${integer(history.head)}. Balances are rawBalances(maker, app, strategyHash, token) on Aqua`
+                  : 'balances are rawBalances(maker, app, strategyHash, token) on Aqua'
+              }
+            >
+              every strategy this vault has shipped
+              {snapshot?.aqua.strategies.length ? `, ${snapshot.aqua.strategies.length}` : ''}
+            </Subhead>
+            {historyError ? (
+              <div className="empty">
+                <span className="unavailable">the log scan stopped early</span>
+                <span className="why">{historyError}</span>
+              </div>
+            ) : null}
+            {snapshot?.aqua.strategies.length ? (
+              <div className="strategies">
+                {snapshot.aqua.strategies.map((strategy) => {
+                  const meta = strategyMeta.get(strategy.hash.toLowerCase())
+                  const isLive = liveStrategyHash?.toLowerCase() === strategy.hash.toLowerCase()
+                  // 255 is Aqua's own marker for a strategy that has been docked, not a count of tokens.
+                  const docked = strategy.balances.some(
+                    (balance) => balance.raw.ok && balance.raw.value.tokensCount === 255,
+                  )
+                  const subtotal = strategy.balances.reduce(
+                    (total, balance) => total + (balance.raw.ok ? balance.raw.value.balance : 0n),
+                    0n,
+                  )
+                  return (
+                    <div className="strategy" key={strategy.hash}>
+                      <div className="strategy-head">
+                        <span className="hash" title={strategy.hash}>
+                          {shortHash(strategy.hash)}
+                        </span>
+                        {isLive ? <span className="chip">quoting now</span> : null}
+                        {docked ? <span className="chip warn">docked</span> : null}
+                      </div>
+                      <div className="strategy-meta">
+                        {meta ? (
+                          <>
+                            block {integer(meta.blockNumber)}, <TxLink hash={meta.txHash} />
+                            {meta.fills
+                              ? `, ${meta.fills} ${meta.fills === 1 ? 'fill' : 'fills'} settled`
+                              : ', no fill settled on it'}
+                          </>
+                        ) : scanned ? (
+                          <>named by deployments/sepolia.json, shipped outside the scanned log window</>
+                        ) : (
+                          <>named by deployments/sepolia.json, the log scan has not placed it yet</>
+                        )}
+                      </div>
+                      {strategy.balances.map((balance) => (
+                        <Field key={balance.token} label={balance.symbol}>
+                          <Show result={balance.raw}>
+                            {(value) => (
+                              <>
+                                <Num>
+                                  {fmtAmount(
+                                    value.balance,
+                                    balance.token.toLowerCase() === snapshot.tokenA.address.toLowerCase()
+                                      ? decimalsA
+                                      : decimalsB,
+                                  )}
+                                </Num>
+                                <Unit>tokensCount {value.tokensCount}</Unit>
+                              </>
+                            )}
+                          </Show>
+                        </Field>
+                      ))}
+                      <div className="strategy-total">
+                        <span>provisioned</span>
+                        <span>
+                          <span className="num">{fmtAmount(subtotal, 18, 0)}</span> tokens
+                        </span>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            ) : (
+              <div className="empty">
+                No strategy found. The vault emits Shipped when it opens one, and this panel reads the balances
+                straight out of the official Aqua under that hash.
+              </div>
+            )}
           </Panel>
         </section>
 
