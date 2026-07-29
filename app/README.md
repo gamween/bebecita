@@ -156,9 +156,11 @@ value the unwind released to land in this vault rather than wherever the taker's
 
 The Shared Liquidity Amplification Coefficient, defined on page 4 of the Aqua whitepaper as the total
 liquidity provisioned across all strategies over the wallet equity backing it. The numerator sums
-`rawBalances(maker, app, strategyHash, token)` over every strategy hash the vault has shipped, found from its
-own `Shipped` events rather than from the deployment record, which only names the live one. It is displayed
-against two denominators:
+`rawBalances(maker, app, strategyHash, token)` over every strategy hash the vault has shipped. Those hashes
+come from the vault's own `Shipped` events, which is what makes the sum a sum rather than one strategy, merged
+with the hash `deployments/sepolia.json` names so that a strategy shipped before the scanned window is still
+counted. The record only ever names the live one, which is why the scan is the source and the record is the
+fallback. It is displayed against two denominators:
 
 - the vault's plain ERC20 balances, which is what a wallet balance check sees. Enormous, and rendered as
   undefined with the reason when the float is zero, which is a legitimate state here and not a crash;

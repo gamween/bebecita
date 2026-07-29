@@ -1,5 +1,9 @@
 # Demo script
 
+The video was never recorded. This script is kept anyway, because every beat in it is a thing that runs, and
+running it is still the fastest way to see the project do what it claims. Read it as the walkthrough rather
+than as a shot list, and read the judges below as whoever is watching.
+
 Three minutes, three screens, and the judges see both legs inside one transaction.
 
 Left: the network panel, raw Uniswap API requests and responses with `x-ratelimit-remaining`. Middle: the
@@ -11,7 +15,7 @@ to the only question that kills a hackathon demo.
 Nothing in this script is conditional. Every beat below describes something that exists and has run. If a beat
 cannot be performed on the day, cut it rather than hedge it out loud.
 
-## Before recording, and this is required
+## Before running it, and this is required
 
 ```bash
 yarn inventory                # what the book is holding right now
@@ -129,10 +133,13 @@ Open the transaction on sepolia.etherscan.io. Two PositionManager calls and a `S
 Second fill, same loop. The position's liquidity moved between the two, and the quote changed accordingly,
 because the instruction rereads the position every time.
 
-The last fill is the number to have on screen if the live one is slow:
+A settled fill is the thing to have on screen if the live one is slow. The last one is
+[`0xba4722e2…`](https://sepolia.etherscan.io/tx/0xba4722e2c443e80d40e4d6b1251e8a6e669fd41d59b6ba10c02571eec1ffc36c),
+1,000 bBRAVO in, 864.399981979604296262 bALPHA out, 340,611 gas, filled from the dashboard by a wallet that is
+not the deployer's. The one `deployments/sepolia.json` records is
 [`0xfa8e60eb…`](https://sepolia.etherscan.io/tx/0xfa8e60eb930b9617455ceeaf36b23bb788532738d1944358c5d5ee59d7a8a704),
-1,000 bBRAVO in, 912.676854023977327256 bALPHA out, 340,599 gas, one hash carrying an unwind, a swap and a
-redeposit.
+1,000 bBRAVO in, 912.676854023977327256 bALPHA out, 340,599 gas. Either one is a single hash carrying an
+unwind, a swap and a redeposit.
 
 ## 2:40 to 3:00, the close
 
@@ -144,8 +151,8 @@ it to work twice."
 
 ## Survival rules
 
-Rebalance before recording. It is the first section of this file for a reason: the opening line of the demo is
-false without it.
+Rebalance first. It is the first section of this file for a reason: the opening line of the demo is false
+without it.
 
 Re-salt the order between full runs. A strategy hash can only be shipped once, ever, because `Aqua.ship`
 requires `tokensCount == 0` and `dock` sets it to `0xff` permanently. The reset script does this; if a rerun
@@ -158,5 +165,5 @@ RPC responding on time is a demo with a single point of failure.
 Have the deployed URL open too, https://bebecita-aqua.vercel.app, so a laptop
 failure costs the demo nothing.
 
-Never open on the word oversubscription. Two other teams here are positioned on solvency floors. Open on the
-funding source.
+Never open on the word oversubscription. Two other teams at the event were positioned on solvency floors, and
+this project is not one of them. Open on the funding source.
