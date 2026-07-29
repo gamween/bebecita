@@ -36,6 +36,7 @@ its proxies, and nineteen fills have settled on chain. Built for ETHGlobal Lisbo
 - [Getting started](#getting-started)
 - [Deployed addresses](#deployed-addresses)
 - [Security and testing](#security-and-testing)
+- [Built by](#built-by)
 - [License](#license)
 
 ## Why idle inventory is the problem
@@ -603,6 +604,20 @@ conservation guard cost a redeployment rather than a setter. The owner can move 
 `setRiskParams` and can `sweep`, and both are owner only and live outside the settlement path.
 
 Iteration discipline, measured on the build machine: a full `forge build` costs **3 min 49** because of `via_ir`, `forge build --skip test` costs **17 s**, and `forge test --match-path <one file>` costs **13 s**. Never run the bare commands, and `yarn test` never does.
+
+## Built by
+
+Two people, at ETHGlobal Lisbon 2026.
+
+**[Sofiane Ben Taleb](https://github.com/gamween)** built the contracts, the custom instruction, the solver and
+the settlement path.
+
+**[Sankara Wigneswaran](https://github.com/Sanka-D)** built the visual direction of the app, the landing page
+and the live console.
+
+Sanka's work landed in `d1c9f94` under a local machine identity rather than a GitHub account, so it does not
+appear in this repository's contributor graph. The `.mailmap` in the root fixes his attribution for `git log`
+and `git shortlog`, and this section is here because that is the part GitHub cannot infer.
 
 ## License
 
