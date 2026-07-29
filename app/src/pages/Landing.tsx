@@ -158,7 +158,7 @@ export function Landing({ config }: { config: AppConfig | null }) {
         </ul>
       </div>
 
-      <section className="section mechanism" id="mechanism">
+      <section className="section" id="mechanism">
         <div className="wrap landing-wrap">
           <div className="section-intro">
             <div>

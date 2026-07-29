@@ -14,7 +14,6 @@ export function reason(error: unknown): string {
 export const EXPLORER = 'https://sepolia.etherscan.io'
 export const addressUrl = (address: string) => `${EXPLORER}/address/${address}`
 export const txUrl = (hash: string) => `${EXPLORER}/tx/${hash}`
-export const tokenUrl = (address: string) => `${EXPLORER}/token/${address}`
 
 /**
  * One numeric rule, applied everywhere.
@@ -63,14 +62,6 @@ export function integer(value: bigint | number): string {
 
 export function bps(value: number): string {
   return `${value} bps, ${(value / 100).toFixed(2)} percent`
-}
-
-export function ago(timestamp: number, now = Date.now()): string {
-  const seconds = Math.max(0, Math.round((now - timestamp) / 1000))
-  if (seconds < 60) return `${seconds}s ago`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ${seconds % 60}s ago`
-  return `${Math.floor(minutes / 60)}h ${minutes % 60}m ago`
 }
 
 /**
