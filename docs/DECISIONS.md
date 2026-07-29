@@ -178,6 +178,36 @@ decays as the pool moves; `reachableAmounts` does not decay. Two `cast call`s at
 the fix is to re-ship with the measured factor and `setRiskParams` to match. Collapsing them would not remove
 the drift, it would remove the instrument.
 
+## Two fills of one position, built after the event, and guard 1 left exactly as it was
+
+This was ruled out during the hackathon and built once the clock stopped. The ranking that dropped it was
+right: it lost to the audit that produced guard five, and a louder demo was never worth an open hole. The
+second reason given at the time was wrong, and it is worth naming because it is the sort of wrong that sounds
+rigorous. T5 was called theatre on the grounds that the reentrancy guard being keyed by order hash is the
+sponsor's property. It is, and that is only what makes two fills in one transaction legal. What they show is
+ours: `AQUA.safeBalances` is read per order hash, so a maker running two strategies against one position has
+two promises and no accounting that relates them, and `0x92` is the only thing in the transaction that does.
+
+`contracts/src/takers/BebecitaTaker.sol` fills back to back through `fillAll`, and nests through
+`preTransferOutCallback`, which `SwapVM.sol:316-319` fires between the maker's hook and `AQUA.pull`. Back to
+back, the second fill lands on `_reachable` of the position the first one left, to the wei. Nested, both fills
+settle and the inner one settles first.
+
+The decision the nested shape forced is about guard 1, and it is to change nothing. `0x92` counts the maker's
+free float towards the quotable balance, and inside the settlement window that float is the outer fill's own
+unwind, already released and not yet pulled. An inner fill is therefore quoted more than its own share of the
+position is worth. Guard 1 refuses it, because it requires the payload to raise the maker's balance by the
+whole `amountOut` rather than merely to leave that much behind, so collateral that was already in the vault
+cannot fund a second payout.
+
+Making guard 1 a level instead of a delta was considered for about as long as it takes to write the diff, and
+it is the wrong direction twice. It would hand a taker in that window the collateral another fill has already
+been promised, and it would buy nothing: a fill quoted against float alone needs no unwind at all, sends an
+empty `preTransferOutHookData`, and settles straight out of the maker's balance without the hook running past
+its first line. Nothing legitimate is blocked by the strict form. What the strict form costs is that a
+composed fill has to be sized against what its own unwind can release, which is what the solver computes
+anyway.
+
 ## Deploy the app, with the proxies, rather than a static build
 
 The dashboard's two most load bearing behaviours both go through a proxy: the Uniswap LP calls, which carry an
@@ -195,13 +225,6 @@ is the same app rather than a demo of it. The two response headers the proxy set
 and `docs/SUBMISSION.md` carries those two commands.
 
 ## Ruled out on purpose
-
-Two fills in one transaction, planned as T5 in `docs/PLAN.md`. A taker contract calling `swap()` twice on two
-strategy hashes of the same maker would have been the loudest ten seconds available, and it was ranked below the
-audit that produced guard five, which closed a path draining the position with all four original guards green.
-It is also theatre with no mechanism of ours in it: the reentrancy guard being keyed by order hash is the
-sponsor's property. Nothing partial was left behind, there is no taker contract, and no transaction on the
-router carries two `Swapped` events.
 
 The instruction as a wrapper with a nested `runLoop`. Four hours on the only component of the critical path,
 for a gain invisible on screen, when guard one already enforces a floor.

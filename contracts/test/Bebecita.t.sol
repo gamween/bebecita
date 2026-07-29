@@ -2,6 +2,7 @@
 pragma solidity 0.8.30;
 
 import { Test, stdError } from "forge-std/Test.sol";
+import { Vm } from "forge-std/Vm.sol";
 
 import { Aqua } from "@1inch/aqua/src/Aqua.sol";
 import { IAqua } from "@1inch/aqua/src/interfaces/IAqua.sol";
@@ -14,6 +15,7 @@ import { Controls } from "@1inch/swap-vm/src/instructions/Controls.sol";
 import { XYCConcentrateArgsBuilder } from "@1inch/swap-vm/src/instructions/XYCConcentrate.sol";
 
 import { BebecitaRouter } from "../src/routers/BebecitaRouter.sol";
+import { BebecitaTaker } from "../src/takers/BebecitaTaker.sol";
 import { BebecitaVault } from "../src/vault/BebecitaVault.sol";
 import { UnwindPricedBalancesArgsBuilder } from "../src/instructions/UnwindPricedBalances.sol";
 import { IHookStats, PoolKey } from "../src/interfaces/IHookStats.sol";
@@ -837,8 +839,285 @@ contract BebecitaTest is Test {
     }
 
     // ---------------------------------------------------------------------
+    // Two fills of one position, in one transaction
+    // ---------------------------------------------------------------------
+
+    /// @notice Two strategies of the same maker, filled back to back, and the second prices against what the
+    ///         first one left.
+    ///
+    /// @dev This is the composition Aqua cannot see. `AQUA.safeBalances` is keyed by order hash, so the two
+    ///      strategies below carry two independent virtual balances of 10,000 each while one position of 1,000
+    ///      liquidity backs both. Nothing in Aqua relates them. Instruction `0x92` does, because it reads
+    ///      `getPositionLiquidity` and the maker's float at execution time rather than trusting what was
+    ///      shipped, so the second fill is quoted against a position the first fill has already drawn on.
+    ///
+    ///      Every figure below is derived rather than picked. The first fill unwinds the whole per fill cap,
+    ///      500, is paid the clamp of 475, and redeposits the 25 of surplus, which is the settlement loop the
+    ///      README draws. That leaves 525 of liquidity, so the second fill's clamp is `_reachable(525)`, and
+    ///      the assertion is equality with that number and not merely that it went down.
+    function test_TwoFills_InOneTransaction_TheSecondPricesAgainstWhatTheFirstLeft() public {
+        BebecitaTaker composing = _composingTaker();
+
+        ISwapVM.Order memory first = _narrowOrder(0x11);
+        ISwapVM.Order memory second = _narrowOrder(0x12);
+        _ship(first);
+        _ship(second);
+
+        uint256 cap = POSITION_LIQUIDITY * MAX_UNWIND_PCT / 100;
+        uint256 firstOut = _reachable(POSITION_LIQUIDITY);
+        uint256 redeposit = cap - firstOut;
+        uint256 liquidityAfterFirst = POSITION_LIQUIDITY - cap + redeposit;
+        uint256 secondOut = _reachable(liquidityAfterFirst);
+        uint256 secondCap = liquidityAfterFirst * MAX_UNWIND_PCT / 100;
+
+        BebecitaTaker.Fill[] memory fills = new BebecitaTaker.Fill[](2);
+        fills[0] = BebecitaTaker.Fill({
+            order: first,
+            amount: 3_000 ether,
+            takerTraitsAndData: _buildTakerData(
+                posm.encodeDecrease(TOKEN_ID, cap, address(vault)),
+                posm.encodeIncrease(TOKEN_ID, redeposit, address(vault))
+            )
+        });
+        fills[1] = BebecitaTaker.Fill({
+            order: second,
+            amount: 3_000 ether,
+            takerTraitsAndData: _buildTakerData(posm.encodeDecrease(TOKEN_ID, secondCap, address(vault)), "")
+        });
+
+        uint256[] memory amountsOut = composing.fillAll(fills);
+
+        assertEq(amountsOut[0], firstOut, "the first fill must land on the clamp the whole position supports");
+        assertEq(amountsOut[1], secondOut, "the second fill must land on the clamp the first one left behind");
+        assertLt(amountsOut[1], amountsOut[0], "a second fill against a drawn down position cannot be as deep");
+        assertEq(token1.balanceOf(address(composing)), firstOut + secondOut, "both payouts landed on the taker");
+        assertEq(posm.liquidityOf(TOKEN_ID), liquidityAfterFirst - secondCap, "the position trace does not add up");
+
+        // The maker's shipped balance was never the constraint, which is the point: twice the clamp is a
+        // fraction of what Aqua would have let these two strategies promise between them.
+        assertLt(firstOut + secondOut, SHIPPED_BALANCE, "the two clamps must stay under one shipped balance");
+
+        composing.sweep(address(token1), address(this), firstOut + secondOut);
+        assertEq(token1.balanceOf(address(composing)), 0, "the taker must not keep the proceeds it collected");
+    }
+
+    /// @notice The per fill cap is measured against the position as it stands, so two fills cannot combine
+    ///         into a withdrawal neither of them was allowed to make.
+    ///
+    /// @dev Guard 3 reads liquidity at hook entry, which is what makes it a per fill cap rather than a per
+    ///      transaction one. The first fill removes half of 1,000 and the second asks for the same absolute
+    ///      size, which is all of what is left. The cap is refused against the reduced figure, so unwinding
+    ///      `maxUnwindPct` twice takes half and then half of the remainder, and iterating never reaches the
+    ///      whole position however many fills a transaction carries.
+    function test_TwoFills_ThePerFillCapMeasuresTheAlreadyReducedPosition() public {
+        BebecitaTaker composing = _composingTaker();
+
+        ISwapVM.Order memory first = _narrowOrder(0x13);
+        ISwapVM.Order memory second = _narrowOrder(0x14);
+        _ship(first);
+        _ship(second);
+
+        uint256 cap = POSITION_LIQUIDITY * MAX_UNWIND_PCT / 100;
+        bytes memory unwindTheCap = posm.encodeDecrease(TOKEN_ID, cap, address(vault));
+
+        BebecitaTaker.Fill[] memory fills = new BebecitaTaker.Fill[](2);
+        fills[0] = BebecitaTaker.Fill({
+            order: first,
+            amount: 3_000 ether,
+            takerTraitsAndData: _buildTakerData(unwindTheCap, "")
+        });
+        fills[1] = BebecitaTaker.Fill({
+            order: second,
+            amount: 3_000 ether,
+            takerTraitsAndData: _buildTakerData(unwindTheCap, "")
+        });
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                BebecitaVault.UnwindExceedsCap.selector, POSITION_LIQUIDITY - cap, uint256(0), MAX_UNWIND_PCT
+            )
+        );
+        composing.fillAll(fills);
+    }
+
+    /// @notice A second fill started inside the first one's settlement window settles, and it settles first.
+    ///
+    /// @dev The window is the one `BebecitaVault` documents: `SwapVM.sol:316-319` fires
+    ///      `preTransferOutCallback` on the taker after the maker's `preTransferOut` hook and before
+    ///      `AQUA.pull`, so the inner fill runs while the outer fill's collateral is unwound and not yet paid
+    ///      out. This is the shape that needs the router's reentrancy guard to be keyed by order hash, since a
+    ///      global guard would refuse the inner `swap` outright.
+    ///
+    ///      Nesting is proven by the log order rather than asserted: two `Swapped` events come out of one
+    ///      call, and the inner order's is the first of the two, which cannot happen if the fills ran back to
+    ///      back.
+    function test_NestedFill_SettlesInsideTheOuterFillsSettlementWindow() public {
+        BebecitaTaker composing = _composingTaker();
+
+        ISwapVM.Order memory outer = _narrowOrder(0x15);
+        ISwapVM.Order memory inner = _narrowOrder(0x16);
+        _ship(outer);
+        _ship(inner);
+
+        uint256 outerUnwind = POSITION_LIQUIDITY * MAX_UNWIND_PCT / 100;
+        uint256 innerUnwind = (POSITION_LIQUIDITY - outerUnwind) * MAX_UNWIND_PCT / 100;
+        uint256 innerAsk = 200 ether;
+
+        BebecitaTaker.Fill memory nested = BebecitaTaker.Fill({
+            order: inner,
+            amount: innerAsk,
+            takerTraitsAndData: _buildTakerData(
+                posm.encodeDecrease(TOKEN_ID, innerUnwind, address(vault)), "", false
+            )
+        });
+
+        BebecitaTaker.Fill[] memory fills = new BebecitaTaker.Fill[](1);
+        fills[0] = BebecitaTaker.Fill({
+            order: outer,
+            amount: 3_000 ether,
+            takerTraitsAndData: _buildNestedTakerData(
+                posm.encodeDecrease(TOKEN_ID, outerUnwind, address(vault)), abi.encode(nested)
+            )
+        });
+
+        vm.recordLogs();
+        uint256[] memory amountsOut = composing.fillAll(fills);
+
+        assertEq(amountsOut[0], _reachable(POSITION_LIQUIDITY), "the outer fill was not clamped as usual");
+        assertEq(
+            token1.balanceOf(address(composing)),
+            amountsOut[0] + innerAsk,
+            "both fills must have paid the same taker in the same transaction"
+        );
+        assertEq(
+            posm.liquidityOf(TOKEN_ID),
+            POSITION_LIQUIDITY - outerUnwind - innerUnwind,
+            "both unwinds must have come out of the one position"
+        );
+
+        bytes32[] memory settled = _swappedOrderHashes();
+        assertEq(settled.length, 2, "one call must have produced two settlements");
+        assertEq(settled[0], ISwapVM(address(router)).hash(inner), "the inner fill did not settle first");
+        assertEq(settled[1], ISwapVM(address(router)).hash(outer), "the outer fill did not settle last");
+    }
+
+    /// @notice The float the clamp counts cannot fund two fills, and guard 1 is what says so.
+    ///
+    /// @dev The one interaction that composition actually creates. `0x92` adds the maker's free float to the
+    ///      reachable share of the position, and inside the settlement window that float is the outer fill's
+    ///      own unwind, sitting in the vault because `AQUA.pull` has not run yet. So the inner fill is quoted
+    ///      737.5 rather than the 237.5 its own share of the position is worth, and a taker asking for all of it
+    ///      would be paid twice out of one withdrawal.
+    ///
+    ///      Nothing about the reentrancy guard stops that, and neither does the cap: the inner unwind below is
+    ///      exactly `maxUnwindPct` of what is left. Guard 1 stops it, because it is a delta and not a level.
+    ///      It requires the payload to raise the maker's balance by the whole `amountOut`, so tokens that were
+    ///      already there when the hook started cannot count towards a second fill. The transaction reverts,
+    ///      the maker pays nothing, and the taker pays the gas.
+    function test_NestedFill_CannotBeFundedTwiceOutOfTheSameFloat() public {
+        BebecitaTaker composing = _composingTaker();
+
+        ISwapVM.Order memory outer = _narrowOrder(0x17);
+        ISwapVM.Order memory inner = _narrowOrder(0x18);
+        _ship(outer);
+        _ship(inner);
+
+        uint256 outerUnwind = POSITION_LIQUIDITY * MAX_UNWIND_PCT / 100;
+        uint256 innerUnwind = (POSITION_LIQUIDITY - outerUnwind) * MAX_UNWIND_PCT / 100;
+
+        // What the inner fill is quoted: the outer fill's proceeds, still in the vault, plus the reachable
+        // part of what the position has left. And what its own payload can actually deliver.
+        uint256 float = posm.releaseFor(outerUnwind);
+        uint256 innerClamp = float + _reachable(POSITION_LIQUIDITY - outerUnwind);
+        uint256 delivered = float + posm.releaseFor(innerUnwind);
+
+        BebecitaTaker.Fill memory nested = BebecitaTaker.Fill({
+            order: inner,
+            amount: 3_000 ether,
+            takerTraitsAndData: _buildTakerData(posm.encodeDecrease(TOKEN_ID, innerUnwind, address(vault)), "")
+        });
+
+        BebecitaTaker.Fill[] memory fills = new BebecitaTaker.Fill[](1);
+        fills[0] = BebecitaTaker.Fill({
+            order: outer,
+            amount: 3_000 ether,
+            takerTraitsAndData: _buildNestedTakerData(
+                posm.encodeDecrease(TOKEN_ID, outerUnwind, address(vault)), abi.encode(nested)
+            )
+        });
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                BebecitaVault.UnwindShortfall.selector, address(token1), delivered, float + innerClamp
+            )
+        );
+        composing.fillAll(fills);
+    }
+
+    /// @notice The taker's callbacks answer to the router and to nothing else.
+    /// @dev `preTransferOutCallback` starts a fill, so anyone who could call it directly could make this
+    ///      contract spend its allowance on an order of their choosing. `preTransferInCallback` is refused
+    ///      outright because no traits this contract fills with ever request it.
+    function test_ComposingTaker_CallbacksRejectAnyCallerButTheRouter() public {
+        BebecitaTaker composing = _composingTaker();
+
+        vm.expectRevert(abi.encodeWithSelector(BebecitaTaker.UnauthorizedCaller.selector, address(this)));
+        composing.preTransferOutCallback(
+            address(vault), address(composing), address(token0), address(token1), 0, 1, bytes32(0), ""
+        );
+
+        vm.expectRevert(BebecitaTaker.UnrequestedCallback.selector);
+        composing.preTransferInCallback(
+            address(vault), address(composing), address(token0), address(token1), 0, 1, bytes32(0), ""
+        );
+    }
+
+    // ---------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------
+
+    /// @dev A funded taker contract, approved for the input side the router pulls.
+    function _composingTaker() internal returns (BebecitaTaker composing) {
+        composing = new BebecitaTaker(address(router), address(this));
+        token0.mint(address(composing), 20_000 ether);
+        composing.approveRouter(address(token0), type(uint256).max);
+    }
+
+    /// @dev What one fill may lean on at a given position size, cap then haircut, as `0x92` computes it.
+    function _reachable(uint256 liquidity) internal pure returns (uint256) {
+        return liquidity * MAX_UNWIND_PCT / 100 * (10_000 - HAIRCUT_BPS) / 10_000;
+    }
+
+    /// @dev The book after the maker re-ranges, which is the shape where the exact-in clamp is reachable and
+    ///      a fill therefore lands on a figure worth asserting.
+    function _narrowOrder(bytes1 salt) internal view returns (ISwapVM.Order memory) {
+        return _buildConcentrateOrder(true, NARROW_SQRT_PRICE_MIN, NARROW_SQRT_PRICE_MAX, salt);
+    }
+
+    /// @dev The order hashes the router settled, in the order it settled them.
+    /// @dev `Swapped` declares no indexed parameter, so the hash travels in the data rather than in a topic.
+    function _swappedOrderHashes() internal returns (bytes32[] memory hashes) {
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        uint256 count;
+        for (uint256 i = 0; i < logs.length; ++i) {
+            if (_isSwapped(logs[i])) ++count;
+        }
+
+        hashes = new bytes32[](count);
+        uint256 next;
+        for (uint256 i = 0; i < logs.length; ++i) {
+            if (!_isSwapped(logs[i])) continue;
+            (hashes[next++],,,,,,) =
+                abi.decode(logs[i].data, (bytes32, address, address, address, address, uint256, uint256));
+        }
+    }
+
+    /// @dev A settlement of this router, as opposed to the hook and Aqua events a fill also emits.
+    function _isSwapped(Vm.Log memory entry) internal view returns (bool) {
+        if (entry.emitter != address(router) || entry.topics.length == 0) return false;
+        return entry.topics[0] == keccak256("Swapped(bytes32,address,address,address,address,uint256,uint256)");
+    }
 
     /// @dev The attack payload, and the `amountOut` it is sized against.
     ///
@@ -1005,6 +1284,39 @@ contract BebecitaTest is Test {
         returns (bytes memory)
     {
         return _buildTakerData(unwindPayload, redepositPayload, isExactIn, true);
+    }
+
+    /// @dev The same, asking the router to call back into the taker between the maker's hook and the pull.
+    ///      `preTransferOutCallbackData` carries the fill the taker will run from inside that window.
+    function _buildNestedTakerData(bytes memory unwindPayload, bytes memory callbackData)
+        internal
+        view
+        returns (bytes memory)
+    {
+        return TakerTraitsLib.build(
+            TakerTraitsLib.Args({
+                taker: taker,
+                isExactIn: true,
+                shouldUnwrapWeth: false,
+                isStrictThresholdAmount: false,
+                isFirstTransferFromTaker: false,
+                useTransferFromAndAquaPush: true,
+                isAToB: true,
+                threshold: "",
+                to: address(0),
+                deadline: 0,
+                hasPreTransferInCallback: false,
+                hasPreTransferOutCallback: true,
+                preTransferInHookData: "",
+                postTransferInHookData: "",
+                preTransferOutHookData: unwindPayload,
+                postTransferOutHookData: "",
+                preTransferInCallbackData: "",
+                preTransferOutCallbackData: callbackData,
+                instructionsArgs: "",
+                signature: ""
+            })
+        );
     }
 
     /// @dev And with the swap direction made explicit, which is what `JumpIfDirection` reads.
