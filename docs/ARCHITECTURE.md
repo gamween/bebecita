@@ -237,6 +237,8 @@ One deployment detail worth recording because it cost time. `vercel.json` routes
 `installCommand` installs both yarn projects, because the root install alone leaves `app/node_modules` empty
 and the build fails on the first import.
 
+## Inventory
+
 A fill moves both tokens and it does not move them symmetrically.
 
 `/lp/decrease` returns both sides of the position pro rata, because that is what removing liquidity from a v4
@@ -247,7 +249,9 @@ and a two sided deposit is capped by whichever token is scarce, which is the one
 can put back a fraction of what came out and no more.
 
 The numbers, all read off receipts by `yarn inventory` rather than modelled, and re-derived from the router's
-own `Swapped` logs for this document. Fifteen fills in one direction removed 14,693.99 units of liquidity from
+own `Swapped` logs. They cover the first fifteen fills, which are the ones the rebalance below was sized
+against. Nineteen fills have settled in total, and `yarn inventory` re-derives the same table over whatever
+window it is given. Those fifteen fills in one direction removed 14,693.99 units of liquidity from
 the position and put 5,856.54 back, which is 39.86%, and the shape behind that average is the part worth
 reading. Cumulatively the first five fills restored between 95.7% and 97.2%, because the book was quoting
 almost nothing out and the unwind's own output came straight back into the position. Once the book quoted near

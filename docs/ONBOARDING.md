@@ -1,6 +1,6 @@
 # Onboarding
 
-For the second dev. Read this, run four commands, and you are productive. Fifteen minutes.
+For the second dev. Read this, run the setup block below, and you are productive. Fifteen minutes.
 
 ## What we are building, in sixty seconds
 
@@ -25,7 +25,7 @@ just in time, atomically".
 git clone git@github.com:gamween/bebecita.git && cd bebecita
 yarn install
 cp .env.example .env          # ask Fianso for the API key, generate your own deployer key
-yarn test                     # 48 tests in three suites, no network, green in under a minute
+yarn test                     # 53 tests in three suites, no network, green in under a minute
 yarn gate0                    # six live checks against Sepolia and the Uniswap API
 ```
 
@@ -53,6 +53,7 @@ minutes, so it was never wired up.
 | `contracts/src/opcodes/BebecitaOpcodes.sol` | Our opcode table. Subclasses `AquaOpcodes`, adds `0x92`, rewires three dead `Controls`. |
 | `contracts/src/routers/BebecitaRouter.sol` | The redeployed SwapVM. Points at the official Aqua. |
 | `contracts/src/vault/BebecitaVault.sol` | The maker. Holds the position, implements the hooks and their five guards, reports URC-3. |
+| `contracts/src/takers/BebecitaTaker.sol` | Two fills of one position in one transaction, back to back and nested. Contracts and tests only, nothing of it is deployed. |
 | `contracts/test/Bebecita.t.sol` | Everything above, asserted. Start here to understand the system. |
 | `contracts/test/TakerTraits.t.sol` | The TypeScript traits builder, diffed byte for byte against `TakerTraitsLib.build`. Fixtures from `yarn fixtures`. |
 | `solver/src/takerTraits.ts` | The port of `TakerTraitsLib.build`. Imported by the browser too. Read it next to the Solidity. |
@@ -125,9 +126,11 @@ it and its calldata goes stale.
 
 ## Working agreement
 
-Commit at every milestone, on a branch, with a real message. ETHGlobal treats repositories with single
-commits of large files as unqualified by default, and 1inch checks commit history explicitly. This is the
-cheapest gate in the whole hackathon and it is lost by not caring.
+Commit at every milestone, on a branch, with a real message, and merge through a pull request. That started
+as a gate, since ETHGlobal treats a repository with one commit of large files as unqualified by default and
+1inch checks commit history explicitly, and it stays the working agreement because the history is the only
+readable account of how the thing was built.
 
-Anything you learn about the sponsors' APIs while integrating goes into `FEEDBACK.md` immediately. It is a
-hard qualifying requirement for the Uniswap track, and the file is currently one of our strongest assets.
+Anything you learn about the sponsors' APIs while integrating goes into `FEEDBACK.md` immediately. It was a
+hard qualifying requirement for the Uniswap track and it is now simply where the findings live, sixteen of
+them, each with a repro and a suggestion.

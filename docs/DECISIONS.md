@@ -250,7 +250,7 @@ citation is the correct answer and costs ten minutes.
 
 ## Positioning
 
-Two teams on site are building solvency floors. This project runs in the opposite direction: it does not stop
+Two teams on site were building solvency floors. This project runs in the opposite direction: it does not stop
 the maker from promising more than the wallet holds, it wires the funding source into the same transaction so
 the promise is honourable. Never open a conversation on the word oversubscription.
 

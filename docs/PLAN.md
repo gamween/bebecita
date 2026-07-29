@@ -5,8 +5,9 @@ report. Where a task shipped differently from the plan, or did not ship at all, 
 rather than edited out of it.
 
 Status as of **2026-07-29**: the contracts are deployed and verified on Ethereum Sepolia, gate zero is green,
-53 tests pass in three suites. Every task shipped. T5 shipped last and after the event, which is written under
-T5 along with the part of its original rationale that turned out to be wrong.
+53 tests pass in three suites. Every build task shipped. T5 shipped last and after the event, which is written
+under T5 along with the part of its original rationale that turned out to be wrong. Two submission artefacts
+were never produced and are recorded as open in `docs/SUBMISSION.md`, under T8 below.
 
 The repository's own counts are deliberately not frozen here. `git rev-list --count origin/main` and `gh pr
 list --state merged --limit 100 --json number --jq 'length'` answer for the commits and the pull requests, and
@@ -138,8 +139,8 @@ What they establish, in the order they were worth writing:
   pays the gas.
 
 What is not claimed. This shipped as contracts and tests, against `MockPositionManager`, and nothing new was
-sent to Sepolia for it. Every `Swapped` the deployed router has ever emitted, seventeen of them, still sits in
-its own transaction, and the command below is how that is checked rather than remembered.
+sent to Sepolia for it. Every `Swapped` the deployed router has ever emitted, nineteen of them, still sits in
+its own transaction, and the command below is how that is counted rather than remembered.
 
 ```bash
 cast logs --from-block 0 --to-block latest \
@@ -175,3 +176,7 @@ Acceptance: the numbers move on their own while nobody touches anything.
 ## T8. Final review
 
 A full read of the diff against both tracks' qualifying requirements, then the submission artefacts.
+
+The review happened and its outcome is `docs/SUBMISSION.md`, row by row. Two of the artefacts it lists were
+never produced: the Uniswap Developer Feedback form was not filed, and the demo video was not recorded. They
+are marked as such there rather than rounded up, and neither is a thing the repository can close on its own.
