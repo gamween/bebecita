@@ -86,9 +86,9 @@ const DEPOSIT_SHARES_BPS = [9_999n, 9_990n, 9_950n, 9_800n, 9_500n]
 /** Below this, the book is balanced enough that a swap would cost more than the drift is worth. */
 const DRIFT_FLOOR_BPS = 10n
 
+// No `approve` and no `allowance` here on purpose. The one approval this command needs is built by
+// `POST /check_approval` and broadcast as the API returned it, so the spender is learned rather than assumed.
 const erc20Abi = parseAbi([
-  'function allowance(address owner, address spender) view returns (uint256)',
-  'function approve(address spender, uint256 amount) returns (bool)',
   'function balanceOf(address account) view returns (uint256)',
   'function transfer(address to, uint256 amount) returns (bool)',
   'function symbol() view returns (string)',

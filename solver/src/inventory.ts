@@ -63,7 +63,6 @@ const erc20Abi = parseAbi([
 
 const vaultAbi = parseAbi([
   'event Unwound(bytes32 indexed orderHash, address indexed token, uint256 released, uint256 required)',
-  'event Redeposited(bytes32 indexed orderHash, uint256 liquidityBefore, uint256 liquidityAfter)',
   'function reachableFromPosition() view returns (uint256)',
 ])
 
